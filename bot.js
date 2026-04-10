@@ -1,8 +1,15 @@
 require("dotenv").config();
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const {
+  default: makeWASocket,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  useMultiFileAuthState,
+  makeCacheableSignalKeyStore
+} = require("@whiskeysockets/baileys");
 const qrcode = require("qrcode-terminal");
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
+const P = require("pino");
 
 // ==================== CONFIGURACIÓN ====================
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -198,34 +205,55 @@ function buildAlertas (car, km) {
   return alertas;
 }
 
-// ==================== BOT PRINCIPAL ====================
-let client;
+// ==================== EXTRACTOR DE TEXTO (BAILEYS) ====================
+function getMessageText (msg) {
+  return (
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage?.caption ||
+    msg.message?.videoMessage?.caption ||
+    ""
+  );
+}
 
-async function reply (chatId, text, msg) {
+// ==================== BOT PRINCIPAL ====================
+let sock;
+
+async function reply (chatId, text, quotedMsg) {
   try {
-    if (msg) {
-      await msg.reply(text);
-    } else {
-      await client.sendMessage(chatId, text);
-    }
+    await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
   } catch (err) {
-    console.error("Error enviando mensaje:", err.message);
+    if (err.message?.includes("No sessions") || err.name === "SessionError") {
+      console.warn(`[reply] No sessions en ${chatId} — forzando metadata y reintentando en 5s...`);
+      if (chatId.endsWith("@g.us")) {
+        try {
+          const meta = await sock.groupMetadata(chatId);
+          console.log(`[debug] groupMetadata fetch exitoso. Participantes: ${meta.participants?.length}`);
+        } catch (e) {
+          console.warn("Fallo groupMetadata:", e.message);
+        }
+      }
+      await new Promise(r => setTimeout(r, 5000));
+      await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
+    } else {
+      throw err;
+    }
   }
 }
 
 async function handleMessage (msg) {
-  const chatId = msg.from;
+  const chatId = msg.key?.remoteJid;
   if (!chatId || chatId === "status@broadcast" || chatId.includes("@newsletter")) return;
 
-  if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "" && chatId !== GRUPO_PERMITIDO && !msg.fromMe) {
+  if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "" && chatId !== GRUPO_PERMITIDO && !msg.key?.fromMe) {
     return;
   }
 
-  const body = msg.body?.trim();
+  const body = getMessageText(msg)?.trim();
   if (!body) return;
 
   // Ignorar las respuestas automáticas del propio bot
-  if (msg.fromMe) {
+  if (msg.key?.fromMe) {
     const isBotReply =
       /⛽|❌|✅|📝|✓|━━━━━━━━|🛢️|🚨|⚠️/i.test(body) ||
       body.includes("Bot de Gasolina") ||
@@ -621,84 +649,165 @@ async function handleMessage (msg) {
   }
 }
 
-// ==================== ARRANQUE DEL BOT (WHATSAPP-WEB.JS) ====================
-let retryCount = 0;
-
+// ==================== ARRANQUE DEL BOT ====================
 async function startBot () {
   try {
-    console.log("Iniciando bot con whatsapp-web.js (Chrome optimizado para Render)...");
+    console.log("Cargando auth state desde disco local...");
+    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
+    console.log("Auth state listo. Obteniendo versión de WhatsApp...");
 
-    client = new Client({
-      authStrategy: new LocalAuth(),
-      puppeteer: {
-        headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-accelerated-2d-canvas",
-          "--no-first-run",
-          "--no-zygote",
-          "--single-process", // Crítico para no superar los 512MB de Render
-          "--disable-gpu"
-        ]
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`Versión de WA: ${version} (isLatest: ${isLatest})`);
+
+    const msgRetryCounterMap = new Map();
+    const msgRetryCounterCache = {
+      get: (key) => msgRetryCounterMap.get(key),
+      set: (key, value) => msgRetryCounterMap.set(key, value)
+    };
+
+    sock = makeWASocket({
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, P({ level: "warn" }))
+      },
+      version,
+      logger: P({ level: "warn" }),
+      printQRInTerminal: false,
+      browser: ["Ubuntu", "Chrome", "20.0.04"],
+      connectTimeoutMs: 60000,
+      retryRequestDelayMs: 2000,
+      msgRetryCounterCache,
+      getMessage: async (key) => {
+        return { conversation: "Buscando mensaje..." };
       }
     });
 
-    client.on("qr", async (qr) => {
-      console.log("\n📱 Escanea este QR con WhatsApp:\n");
-      qrcode.generate(qr, { small: true });
-      const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
-      console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
-      console.log(qrLink);
-      console.log("");
-      
-      await sendTelegramAlert(
-        `🚨 *Sesión expirada / QR Requerido*\n\n` +
-        `El bot necesita escanear el código QR.\n\n` +
-        `📷 [Ver QR en alta resolución](${qrLink})\n\n` +
-        `Abre ese link desde el celular y escanéalo con WhatsApp.`
-      );
-    });
+    sock.ev.on("creds.update", saveCreds);
 
-    client.on("ready", async () => {
-      console.log("✅ Bot conectado y listo!\n");
-      if (retryCount > 0) {
-        await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nChrome inició sesión tras previos fallos.`);
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        console.log("\n📱 Escanea este QR con WhatsApp:\n");
+        qrcode.generate(qr, { small: true });
+        const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
+        console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
+        console.log(qrLink);
+        console.log("");
+        await sendTelegramAlert(
+          `🚨 *Sesión expirada — acción requerida*\n\n` +
+          `El bot necesita que escanees el QR para reconectarse.\n\n` +
+          `📷 [Ver QR en alta resolución](${qrLink})\n\n` +
+          `Abre ese link desde el celular y escanéalo con WhatsApp.`
+        );
       }
-      retryCount = 0;
 
-      // Intentar notificar al grupo si está configurado
-      if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
-        setTimeout(async () => {
-          try {
-            await reply(GRUPO_PERMITIDO, "Sistema reiniciado", null);
-            console.log("Mensaje de reinicio enviado al grupo.");
-          } catch (e) {
-            console.error("No se pudo notificar al grupo:", e.message);
+      if (connection === "close") {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const errorMsg = lastDisconnect?.error?.message || "Desconocido";
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        console.log(`Conexión cerrada. Código: ${statusCode} | Error: ${errorMsg} | Reconectar: ${shouldReconnect}`);
+
+        if (global.keepAliveInterval) {
+          clearInterval(global.keepAliveInterval);
+          global.keepAliveInterval = null;
+        }
+
+        if (shouldReconnect) {
+          if (statusCode === 440) {
+            console.log("⚠️ [Conflict 440] Otra instancia activa detectada. Esperando 30s antes de reconectar...");
+            setTimeout(() => startBot(), 30000);
+            return;
           }
-        }, 5000);
+
+          if (global.shuttingDown) {
+            console.log("🛑 Apagado en progreso — no se reconecta.");
+            return;
+          }
+
+          retryCount++;
+          const delay = Math.min(retryCount * 5000, 60000);
+          console.log(`Reconectando (intento #${retryCount}) en ${delay / 1000}s...`);
+          if (retryCount === 5) {
+            await sendTelegramAlert(
+              `⚠️ *Bot con problemas de conexión*\n\n` +
+              `Lleva *${retryCount} intentos* fallidos reconectándose a WhatsApp.\n` +
+              `Código de error: \`${statusCode}\` — ${errorMsg}`
+            );
+          }
+          setTimeout(() => startBot(), delay);
+        } else {
+          console.log("Sesión cerrada permanentemente (logged out). Borra la carpeta de auth local en caso de que persista.");
+          await sendTelegramAlert(
+            `❌ *Sesión cerrada permanentemente*\n\n` +
+            `WhatsApp cerró la sesión del bot (logged out).\n\n` +
+            `Deberás escanear el nuevo QR en los logs para conectar de nuevo.`
+          );
+        }
+      }
+
+      if (connection === "open") {
+        const wasDown = retryCount > 0;
+        retryCount = 0;
+        console.log("✅ Bot conectado y listo!\n");
+        if (wasDown) {
+          await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nWhatsApp volvió a conectarse después de varios intentos.`);
+        }
+
+        global.botReady = false;
+        global.messageQueue = [];
+        setTimeout(() => {
+          global.botReady = true;
+          console.log("[Warmup] Sesiones listas. Procesando mensajes encolados:", global.messageQueue.length);
+          for (const m of global.messageQueue) {
+            handleMessage(m).catch(err => console.error("Error en mensaje encolado:", err.message));
+          }
+          global.messageQueue = [];
+        }, 10000);
+
+        if (global.keepAliveInterval) clearInterval(global.keepAliveInterval);
+        global.keepAliveInterval = setInterval(async () => {
+          try {
+            await sock.sendPresenceUpdate("available");
+            console.log("[KeepAlive] Presencia enviada a WhatsApp.");
+          } catch (e) {
+            console.warn("[KeepAlive] Error al enviar presencia:", e.message);
+          }
+        }, 10 * 60 * 1000);
+
+        if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
+          setTimeout(async () => {
+            try {
+              await reply(GRUPO_PERMITIDO, "Sistema reiniciado");
+              console.log("Mensaje de reinicio enviado al grupo.");
+            } catch (e) {
+              console.error("No se pudo notificar al grupo:", e.message);
+            }
+          }, 15000);
+        }
       }
     });
 
-    client.on("disconnected", async (reason) => {
-      console.log("Sesión cerrada (logged out):", reason);
-      await sendTelegramAlert(
-        `❌ *Sesión desconectada*\n\n` +
-        `Motivo: ${reason}\n\n` +
-        `Deberás forzar un Manual Deploy en Render y buscar el nuevo QR en los logs.`
-      );
-    });
-
-    client.on("message", async (msg) => {
-      try {
-        await handleMessage(msg);
-      } catch (err) {
-        console.error("Error procesando mensaje:", err.message);
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      if (type !== "notify") return;
+      for (const m of messages) {
+        if (!global.botReady) {
+          console.log("[Warmup] Mensaje encolado hasta que las sesiones E2E estén listas.");
+          global.messageQueue = global.messageQueue || [];
+          global.messageQueue.push(m);
+          continue;
+        }
+        try {
+          await handleMessage(m);
+        } catch (err) {
+          if (err.name === "SessionError" || err.message?.includes("No sessions") || err.message?.includes("Bad MAC")) {
+            console.warn("[SessionError ignorado - renegociando E2E automaticamente]", err.message);
+          } else {
+            console.error("Error procesando mensaje:", err.message);
+          }
+        }
       }
     });
-
-    client.initialize();
 
   } catch (err) {
     console.error("❌ Error fatal al iniciar el bot:", err.message);
@@ -709,7 +818,9 @@ async function startBot () {
   }
 }
 
-// Retrasar 15s antes de inicializar Puppeteer para evitar conflictos de "kill" de Render
+let retryCount = 0;
+console.log("Iniciando bot con Baileys (MultiFileAuthState local)...");
+// Retrasar 15s antes de inicializar para evitar conflictos de "kill" de Render
 console.log("Esperando 15s para que la instancia anterior se cierre (anti-conflicto deploy)...");
 setTimeout(() => startBot(), 15000);
 
@@ -717,8 +828,12 @@ setTimeout(() => startBot(), 15000);
 async function shutdown (signal) {
   console.log(`\n[${signal}] Apagando instancia limpiamente...`);
   global.shuttingDown = true;
+  if (global.keepAliveInterval) {
+    clearInterval(global.keepAliveInterval);
+    global.keepAliveInterval = null;
+  }
   try {
-    if (client) await client.destroy(); // Cierra Puppeteer ordenadamente
+    if (sock) sock.end();
   } catch (_) { }
   setTimeout(() => process.exit(0), 1500);
 }
