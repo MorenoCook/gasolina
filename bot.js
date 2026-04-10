@@ -3,6 +3,34 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
+const fs = require("fs");
+
+// ==================== CHROMIUM PATH DETECTOR ====================
+// Render (y otras plataformas Linux) tienen Chromium instalado en el sistema.
+// whatsapp-web.js usa su propio puppeteer-core que NO comparte la cache de
+// la dependencia `puppeteer` raíz, por eso el postinstall no ayuda.
+// Solución: apuntar directamente al binario del sistema.
+function findChromiumExecutable () {
+  const candidates = [
+    process.env.PUPPETEER_EXECUTABLE_PATH,          // variable de entorno manual (prioridad máxima)
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    "/snap/bin/chromium",
+    "/usr/local/bin/chromium"
+  ];
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) {
+      console.log(`[Chrome] Usando ejecutable del sistema: ${p}`);
+      return p;
+    }
+  }
+  console.warn("[Chrome] No se encontró Chromium del sistema. Puppeteer intentará descargar Chrome.");
+  return undefined; // puppeteer-core buscará en su cache
+}
+
+const CHROMIUM_EXECUTABLE = findChromiumExecutable();
 
 // ==================== CONFIGURACIÓN ====================
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -634,6 +662,7 @@ async function startBot () {
       qrMaxRetries: 5, // Reintentar el QR si falla la carga
       puppeteer: {
         headless: true,
+        executablePath: CHROMIUM_EXECUTABLE, // Binario del sistema (Render/Linux)
         timeout: 120000, // Darle 2 minutos a Chrome para abrir
         args: [
           "--no-sandbox",

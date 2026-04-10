@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node --max-old-space-size=150 bot.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "render-build": "apt-get install -y chromium-browser || apt-get install -y chromium || true"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.78.0",
