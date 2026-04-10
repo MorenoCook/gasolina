@@ -3,31 +3,27 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
-const fs = require("fs");
-
 // ==================== CHROMIUM PATH DETECTOR ====================
-// Render (y otras plataformas Linux) tienen Chromium instalado en el sistema.
-// whatsapp-web.js usa su propio puppeteer-core que NO comparte la cache de
-// la dependencia `puppeteer` raíz, por eso el postinstall no ayuda.
-// Solución: apuntar directamente al binario del sistema.
+// whatsapp-web.js usa su propio puppeteer-core interno que NO auto-descarga
+// Chrome. Solución: pedirle al paquete `puppeteer` (que sí descarga Chrome
+// en el postinstall) la ruta exacta de su binario y pasársela al Client.
 function findChromiumExecutable () {
-  const candidates = [
-    process.env.PUPPETEER_EXECUTABLE_PATH,          // variable de entorno manual (prioridad máxima)
-    "/usr/bin/google-chrome-stable",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/chromium",
-    "/snap/bin/chromium",
-    "/usr/local/bin/chromium"
-  ];
-  for (const p of candidates) {
-    if (p && fs.existsSync(p)) {
-      console.log(`[Chrome] Usando ejecutable del sistema: ${p}`);
-      return p;
-    }
+  // 1. Variable de entorno manual (máxima prioridad, útil para overrides)
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    console.log(`[Chrome] Usando PUPPETEER_EXECUTABLE_PATH: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
   }
-  console.warn("[Chrome] No se encontró Chromium del sistema. Puppeteer intentará descargar Chrome.");
-  return undefined; // puppeteer-core buscará en su cache
+  // 2. Ruta reportada por el paquete `puppeteer` del proyecto (instalado via postinstall)
+  try {
+    const puppeteer = require("puppeteer");
+    const path = puppeteer.executablePath();
+    console.log(`[Chrome] Usando Chrome de puppeteer: ${path}`);
+    return path;
+  } catch (e) {
+    console.warn("[Chrome] No se pudo obtener la ruta de puppeteer:", e.message);
+  }
+  console.warn("[Chrome] Sin ruta de Chrome. Puede fallar el inicio.");
+  return undefined;
 }
 
 const CHROMIUM_EXECUTABLE = findChromiumExecutable();
