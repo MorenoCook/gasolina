@@ -726,7 +726,7 @@ async function startBot () {
       version,
       logger: P({ level: "warn" }),
       printQRInTerminal: false,
-      browser: ["GasolinaBot", "Chrome", "1.0.0"],
+      browser: ["Ubuntu", "Chrome", "20.0.04"],
       connectTimeoutMs: 60000,
       // Reintentar peticiones fallidas con un delay para evitar ban temporal
       retryRequestDelayMs: 2000,
