@@ -24,12 +24,40 @@ const GRUPO_PERMITIDO = "5214111103705-1532543388@g.us";
 const LINK_CARPETA_SEGUROS =
   "https://drive.google.com/drive/folders/11GbfKwxzQUxYjA4wCQ4joRE15dpep9Xa?usp=sharing";
 
+// 📲 TELEGRAM (alertas cuando el bot se cae o necesita acción)
+// Pasos para configurar:
+//   1. Habla con @BotFather en Telegram → /newbot → copia el token
+//   2. Manda cualquier mensaje a tu nuevo bot
+//   3. Abre: https://api.telegram.org/bot<TOKEN>/getUpdates → copia tu chat_id
+//   4. Agrega en Render como variables de entorno: TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
 // ==================== EXPRESS (UptimeRobot) ====================
 const app = express();
 app.get("/", (req, res) => res.send("Bot Activo 24/7 (Render + UptimeRobot)"));
 app.listen(process.env.PORT || 3000, () =>
   console.log("Servidor Express escuchando (Listo para UptimeRobot)")
 );
+
+// ==================== ALERTAS TELEGRAM ====================
+async function sendTelegramAlert(message) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return; // No configurado, omitir
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: `🤖 *GasolinaBot*\n\n${message}`,
+        parse_mode: "Markdown"
+      })
+    });
+  } catch (e) {
+    console.warn("[Telegram] No se pudo enviar alerta:", e.message);
+  }
+}
 
 // ==================== AUTH STATE CON SUPABASE ====================
 async function useSupabaseAuthState() {
@@ -673,7 +701,12 @@ async function startBot() {
       logger: P({ level: "warn" }),
       printQRInTerminal: false,
       browser: ["GasolinaBot", "Chrome", "1.0.0"],
-      connectTimeoutMs: 60000
+      connectTimeoutMs: 60000,
+      // Evitar sincronización completa del historial al reconectar
+      // (reduce la carga de claves Signal y errores de init queries)
+      syncFullHistory: false,
+      // Reintentar peticiones fallidas con un delay para evitar ban temporal
+      retryRequestDelayMs: 2000
     });
 
   sock.ev.on("creds.update", saveCreds);
@@ -688,6 +721,13 @@ async function startBot() {
       console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
       console.log(qrLink);
       console.log("");
+      // 🚨 La sesión expiró — se necesita escanear el QR manualmente
+      await sendTelegramAlert(
+        `🚨 *Sesión expirada — acción requerida*\n\n` +
+        `El bot necesita que escanees el QR para reconectarse.\n\n` +
+        `📷 [Ver QR en alta resolución](${qrLink})\n\n` +
+        `Abre ese link desde el celular y escanéalo con WhatsApp.`
+      );
     }
 
     if (connection === "close") {
@@ -695,24 +735,65 @@ async function startBot() {
       const errorMsg = lastDisconnect?.error?.message || "Desconocido";
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       console.log(`Conexión cerrada. Código: ${statusCode} | Error: ${errorMsg} | Reconectar: ${shouldReconnect}`);
+
+      // Limpiar keepalive si existe
+      if (global.keepAliveInterval) {
+        clearInterval(global.keepAliveInterval);
+        global.keepAliveInterval = null;
+      }
+
       if (shouldReconnect) {
         retryCount++;
-        if (retryCount > 10) {
-          console.log("⛔ Máximo de reintentos alcanzado (10). Reinicia manualmente desde Render.");
-          return;
+        // Backoff exponencial sin límite máximo de reintentos:
+        // 3s, 6s, 9s... hasta 60s de tope — nunca se rinde
+        const delay = Math.min(retryCount * 3000, 60000);
+        console.log(`Reconectando (intento #${retryCount}) en ${delay / 1000}s...`);
+        // Alertar si lleva varios intentos fallidos seguidos
+        if (retryCount === 5) {
+          await sendTelegramAlert(
+            `⚠️ *Bot con problemas de conexión*\n\n` +
+            `Lleva *${retryCount} intentos* fallidos reconectándose a WhatsApp.\n` +
+            `Código de error: \`${statusCode}\` — ${errorMsg}\n\n` +
+            `Seguirá intentando automáticamente. Si no se recupera en unos minutos, revisa los logs en Render.`
+          );
         }
-        const delay = Math.min(retryCount * 3000, 15000);
-        console.log(`Reintento #${retryCount} en ${delay / 1000} segundos...`);
         setTimeout(() => startBot(), delay);
       } else {
-        console.log("Sesión cerrada permanentemente. Borra la tabla baileys_auth en Supabase y reinicia.");
+        console.log("Sesión cerrada permanentemente (logged out). Borra la tabla baileys_auth en Supabase y reinicia.");
+        await sendTelegramAlert(
+          `❌ *Sesión cerrada permanentemente*\n\n` +
+          `WhatsApp cerró la sesión del bot (logged out).\n\n` +
+          `*Pasos para recuperar:*\n` +
+          `1. Ve a Supabase → tabla \`baileys_auth\` → borra todas las filas\n` +
+          `2. Reinicia el servicio en Render\n` +
+          `3. Escanea el QR que aparecerá en los logs`
+        );
       }
     }
 
     if (connection === "open") {
+      const wasDown = retryCount > 0;
       retryCount = 0;
       console.log("✅ Bot conectado y listo!\n");
+      // Notificar reconexión solo si venía de un fallo (no al arranque inicial)
+      if (wasDown) {
+        await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nWhatsApp volvió a conectarse después de varios intentos.`);
+      }
+
+      // KeepAlive: actualizar presencia cada 10 min para que WhatsApp
+      // no cierre el WebSocket por inactividad (UptimeRobot solo hace HTTP)
+      if (global.keepAliveInterval) clearInterval(global.keepAliveInterval);
+      global.keepAliveInterval = setInterval(async () => {
+        try {
+          await sock.sendPresenceUpdate("available");
+          console.log("[KeepAlive] Presencia enviada a WhatsApp.");
+        } catch (e) {
+          console.warn("[KeepAlive] Error al enviar presencia:", e.message);
+        }
+      }, 10 * 60 * 1000); // cada 10 minutos
+
       if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
+        // Esperar 20s para que las sesiones E2E se sincronicen antes de enviar
         setTimeout(async () => {
           try {
             await sock.sendMessage(GRUPO_PERMITIDO, { text: "Sistema reiniciado" });
@@ -720,7 +801,7 @@ async function startBot() {
           } catch (e) {
             console.error("No se pudo notificar al grupo:", e.message);
           }
-        }, 5000);
+        }, 20000);
       }
     }
   });
@@ -731,7 +812,13 @@ async function startBot() {
       try {
         await handleMessage(m);
       } catch (err) {
-        console.error("Error procesando mensaje:", err.message);
+        // Los errores de sesión Signal son normales tras reconexión post-hibernación;
+        // no es necesario actuar, Baileys los renegocia automáticamente.
+        if (err.name === "SessionError" || err.message?.includes("No sessions") || err.message?.includes("Bad MAC")) {
+          console.warn("[SessionError ignorado - renegociando E2E automaticamente]", err.message);
+        } else {
+          console.error("Error procesando mensaje:", err.message);
+        }
       }
     }
   });
@@ -739,11 +826,9 @@ async function startBot() {
   } catch (err) {
     console.error("❌ Error fatal al iniciar el bot:", err.message);
     retryCount++;
-    if (retryCount <= 10) {
-      const delay = Math.min(retryCount * 3000, 15000);
-      console.log(`Reintento #${retryCount} en ${delay / 1000} segundos...`);
-      setTimeout(() => startBot(), delay);
-    }
+    const delay = Math.min(retryCount * 3000, 60000);
+    console.log(`Reintento #${retryCount} en ${delay / 1000}s...`);
+    setTimeout(() => startBot(), delay);
   }
 }
 
