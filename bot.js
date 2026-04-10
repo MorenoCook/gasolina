@@ -278,7 +278,18 @@ function getMessageText(msg) {
 let sock;
 
 async function reply(chatId, text, quotedMsg) {
-  await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
+  try {
+    await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
+  } catch (err) {
+    // Si las sesiones E2E aún no están listas, reintenta una vez después de 5s
+    if (err.message?.includes("No sessions") || err.name === "SessionError") {
+      console.warn("[reply] No sessions — reintentando en 5s...");
+      await new Promise(r => setTimeout(r, 5000));
+      await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
+    } else {
+      throw err;
+    }
+  }
 }
 
 async function handleMessage(msg) {
@@ -795,6 +806,19 @@ async function startBot() {
         await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nWhatsApp volvió a conectarse después de varios intentos.`);
       }
 
+      // Período de calentamiento: esperar 10s para que las sesiones E2E se establezcan
+      // antes de procesar mensajes. Si alguien escribe durante ese período, se encola.
+      global.botReady = false;
+      global.messageQueue = [];
+      setTimeout(() => {
+        global.botReady = true;
+        console.log("[Warmup] Sesiones listas. Procesando mensajes encolados:", global.messageQueue.length);
+        for (const m of global.messageQueue) {
+          handleMessage(m).catch(err => console.error("Error en mensaje encolado:", err.message));
+        }
+        global.messageQueue = [];
+      }, 10000);
+
       // KeepAlive: actualizar presencia cada 10 min para que WhatsApp
       // no cierre el WebSocket por inactividad (UptimeRobot solo hace HTTP)
       if (global.keepAliveInterval) clearInterval(global.keepAliveInterval);
@@ -824,6 +848,13 @@ async function startBot() {
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const m of messages) {
+      // Si el bot aún está en calentamiento, encolar el mensaje
+      if (!global.botReady) {
+        console.log("[Warmup] Mensaje encolado hasta que las sesiones E2E estén listas.");
+        global.messageQueue = global.messageQueue || [];
+        global.messageQueue.push(m);
+        continue;
+      }
       try {
         await handleMessage(m);
       } catch (err) {
