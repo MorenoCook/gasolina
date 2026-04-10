@@ -207,7 +207,7 @@ const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-const store = new PostgresStore({ client: pool });
+const store = new PostgresStore({ pool: pool });
 
 const client = new Client({
   authStrategy: new RemoteAuth({ store: store, backupSyncIntervalMs: 300000 }),
