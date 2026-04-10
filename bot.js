@@ -707,7 +707,7 @@ async function startBot () {
       console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
       console.log(qrLink);
       console.log("");
-      
+
       const now = Date.now();
       if (!global.lastQrAlert || now - global.lastQrAlert > 5 * 60 * 1000) {
         global.lastQrAlert = now;
@@ -718,6 +718,21 @@ async function startBot () {
           `Abre ese link desde el celular y escanéalo con WhatsApp.`
         );
       }
+    });
+
+    // 🔍 DIAGNÓSTICO: se dispara cuando WhatsApp confirma el QR (antes de ready)
+    client.on("authenticated", () => {
+      console.log("🔐 [Auth] QR aceptado — sesión autenticada. Cargando WhatsApp Web...");
+    });
+
+    // 🔍 DIAGNÓSTICO: progreso de la pantalla de carga de WhatsApp Web
+    client.on("loading_screen", (percent, message) => {
+      console.log(`⏳ [Loading] ${percent}% — ${message}`);
+    });
+
+    // 🔍 DIAGNÓSTICO: fallo de autenticación
+    client.on("auth_failure", (msg) => {
+      console.error("❌ [Auth] FALLO de autenticación:", msg);
     });
 
     client.on("ready", async () => {
