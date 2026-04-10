@@ -743,6 +743,15 @@ async function startBot() {
       }
 
       if (shouldReconnect) {
+        // Código 440 = connectionReplaced: otra instancia se conectó con las mismas credenciales.
+        // Si reconectamos inmediatamente, las dos instancias se "patean" mutuamente en loop.
+        // Esperamos 30s para darle tiempo a Render de terminar la instancia antigua.
+        if (statusCode === 440) {
+          console.log("⚠️ [Conflict 440] Otra instancia activa detectada. Esperando 30s antes de reconectar...");
+          setTimeout(() => startBot(), 30000);
+          return;
+        }
+
         retryCount++;
         // Backoff exponencial sin límite máximo de reintentos:
         // 3s, 6s, 9s... hasta 60s de tope — nunca se rinde
