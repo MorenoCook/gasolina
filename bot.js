@@ -41,7 +41,7 @@ app.listen(process.env.PORT || 3000, () =>
 );
 
 // ==================== ALERTAS TELEGRAM ====================
-async function sendTelegramAlert(message) {
+async function sendTelegramAlert (message) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return; // No configurado, omitir
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -60,7 +60,7 @@ async function sendTelegramAlert(message) {
 }
 
 // ==================== AUTH STATE CON SUPABASE ====================
-async function useSupabaseAuthState() {
+async function useSupabaseAuthState () {
   const write = async (key, data) => {
     const val = JSON.stringify(data, BufferJSON.replacer);
     await supabase.from("baileys_auth").upsert([{ key, value: val }]);
@@ -119,7 +119,7 @@ async function useSupabaseAuthState() {
 }
 
 // ==================== FUNCIONES DE DATOS (SUPABASE) ====================
-async function appendCSV(row) {
+async function appendCSV (row) {
   const fecha = new Date().toLocaleString("es-MX", {
     timeZone: "America/Mexico_City"
   });
@@ -138,7 +138,7 @@ async function appendCSV(row) {
   ]);
 }
 
-async function loadCars() {
+async function loadCars () {
   const { data, error } = await supabase
     .from("cars")
     .select("state_json")
@@ -168,27 +168,27 @@ async function loadCars() {
   return cars;
 }
 
-async function saveCars(cars) {
+async function saveCars (cars) {
   await supabase.from("cars").upsert([{ id: 1, state_json: cars }]);
 }
 
 // ==================== SESIONES EN MEMORIA ====================
 const sessions = {};
-function getSession(chatId) {
+function getSession (chatId) {
   if (!sessions[chatId]) sessions[chatId] = { step: "idle" };
   return sessions[chatId];
 }
-function resetSession(chatId) {
+function resetSession (chatId) {
   sessions[chatId] = { step: "idle" };
 }
 
 // ==================== UTILIDADES ====================
-function parseNumber(text) {
+function parseNumber (text) {
   const n = parseFloat(text.replace(",", ".").trim());
   return isNaN(n) ? null : n;
 }
 
-function parseRegistroExpress(textoOriginal) {
+function parseRegistroExpress (textoOriginal) {
   const lower = textoOriginal.toLowerCase();
 
   let carKey = null;
@@ -228,7 +228,7 @@ function parseRegistroExpress(textoOriginal) {
   return { carKey, km, litros: lts, cost };
 }
 
-function carMenu(cars) {
+function carMenu (cars) {
   return (
     `*Bot de Gasolina*\n\n` +
     `¿Cuál auto vas a cargar?\n\n` +
@@ -239,7 +239,7 @@ function carMenu(cars) {
   );
 }
 
-function buildAlertas(car, km) {
+function buildAlertas (car, km) {
   let alertas = "";
   if (car.lastOilKm !== null) {
     const oilDiff = km - car.lastOilKm;
@@ -264,7 +264,7 @@ function buildAlertas(car, km) {
 }
 
 // ==================== EXTRACTOR DE TEXTO (BAILEYS) ====================
-function getMessageText(msg) {
+function getMessageText (msg) {
   return (
     msg.message?.conversation ||
     msg.message?.extendedTextMessage?.text ||
@@ -277,7 +277,7 @@ function getMessageText(msg) {
 // ==================== BOT PRINCIPAL ====================
 let sock;
 
-async function reply(chatId, text, quotedMsg) {
+async function reply (chatId, text, quotedMsg) {
   try {
     await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
   } catch (err) {
@@ -292,7 +292,7 @@ async function reply(chatId, text, quotedMsg) {
   }
 }
 
-async function handleMessage(msg) {
+async function handleMessage (msg) {
   const chatId = msg.key.remoteJid;
   if (!chatId || chatId === "status@broadcast" || chatId.includes("@newsletter")) return;
 
@@ -697,7 +697,7 @@ async function handleMessage(msg) {
 }
 
 // ==================== ARRANQUE DEL BOT ====================
-async function startBot() {
+async function startBot () {
   try {
     console.log("Cargando auth state desde Supabase...");
     const { state, saveCreds } = await useSupabaseAuthState();
@@ -720,154 +720,142 @@ async function startBot() {
       retryRequestDelayMs: 2000
     });
 
-  sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
-      console.log("\n📱 Escanea este QR con WhatsApp:\n");
-      qrcode.generate(qr, { small: true });
-      const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
-      console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
-      console.log(qrLink);
-      console.log("");
-      // 🚨 La sesión expiró — se necesita escanear el QR manualmente
-      await sendTelegramAlert(
-        `🚨 *Sesión expirada — acción requerida*\n\n` +
-        `El bot necesita que escanees el QR para reconectarse.\n\n` +
-        `📷 [Ver QR en alta resolución](${qrLink})\n\n` +
-        `Abre ese link desde el celular y escanéalo con WhatsApp.`
-      );
-    }
-
-    if (connection === "close") {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const errorMsg = lastDisconnect?.error?.message || "Desconocido";
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log(`Conexión cerrada. Código: ${statusCode} | Error: ${errorMsg} | Reconectar: ${shouldReconnect}`);
-
-      // Limpiar keepalive si existe
-      if (global.keepAliveInterval) {
-        clearInterval(global.keepAliveInterval);
-        global.keepAliveInterval = null;
-      }
-
-      if (shouldReconnect) {
-        // Código 440 = connectionReplaced: otra instancia se conectó con las mismas credenciales.
-        // Si reconectamos inmediatamente, las dos instancias se "patean" mutuamente en loop.
-        // Esperamos 30s para darle tiempo a Render de terminar la instancia antigua.
-        if (statusCode === 440) {
-          console.log("⚠️ [Conflict 440] Otra instancia activa detectada. Esperando 30s antes de reconectar...");
-          setTimeout(() => startBot(), 30000);
-          return;
-        }
-
-        // Si Render nos mandó SIGTERM (está apagando esta instancia), NO reconectar
-        if (global.shuttingDown) {
-          console.log("🛑 Apagado en progreso — no se reconecta.");
-          return;
-        }
-
-        retryCount++;
-        // Backoff exponencial sin límite máximo de reintentos:
-        // 3s, 6s, 9s... hasta 60s de tope — nunca se rinde
-        const delay = Math.min(retryCount * 3000, 60000);
-        console.log(`Reconectando (intento #${retryCount}) en ${delay / 1000}s...`);
-        // Alertar si lleva varios intentos fallidos seguidos
-        if (retryCount === 5) {
-          await sendTelegramAlert(
-            `⚠️ *Bot con problemas de conexión*\n\n` +
-            `Lleva *${retryCount} intentos* fallidos reconectándose a WhatsApp.\n` +
-            `Código de error: \`${statusCode}\` — ${errorMsg}\n\n` +
-            `Seguirá intentando automáticamente. Si no se recupera en unos minutos, revisa los logs en Render.`
-          );
-        }
-        setTimeout(() => startBot(), delay);
-      } else {
-        console.log("Sesión cerrada permanentemente (logged out). Borra la tabla baileys_auth en Supabase y reinicia.");
+      if (qr) {
+        console.log("\n📱 Escanea este QR con WhatsApp:\n");
+        qrcode.generate(qr, { small: true });
+        const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
+        console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
+        console.log(qrLink);
+        console.log("");
+        // 🚨 La sesión expiró — se necesita escanear el QR manualmente
         await sendTelegramAlert(
-          `❌ *Sesión cerrada permanentemente*\n\n` +
-          `WhatsApp cerró la sesión del bot (logged out).\n\n` +
-          `*Pasos para recuperar:*\n` +
-          `1. Ve a Supabase → tabla \`baileys_auth\` → borra todas las filas\n` +
-          `2. Reinicia el servicio en Render\n` +
-          `3. Escanea el QR que aparecerá en los logs`
+          `🚨 *Sesión expirada — acción requerida*\n\n` +
+          `El bot necesita que escanees el QR para reconectarse.\n\n` +
+          `📷 [Ver QR en alta resolución](${qrLink})\n\n` +
+          `Abre ese link desde el celular y escanéalo con WhatsApp.`
         );
       }
-    }
 
-    if (connection === "open") {
-      const wasDown = retryCount > 0;
-      retryCount = 0;
-      console.log("✅ Bot conectado y listo!\n");
-      // Notificar reconexión solo si venía de un fallo (no al arranque inicial)
-      if (wasDown) {
-        await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nWhatsApp volvió a conectarse después de varios intentos.`);
-      }
+      if (connection === "close") {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const errorMsg = lastDisconnect?.error?.message || "Desconocido";
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        console.log(`Conexión cerrada. Código: ${statusCode} | Error: ${errorMsg} | Reconectar: ${shouldReconnect}`);
 
-      // Período de calentamiento: esperar 10s para que las sesiones E2E se establezcan
-      // antes de procesar mensajes. Si alguien escribe durante ese período, se encola.
-      global.botReady = false;
-      global.messageQueue = [];
-      setTimeout(() => {
-        global.botReady = true;
-        console.log("[Warmup] Sesiones listas. Procesando mensajes encolados:", global.messageQueue.length);
-        for (const m of global.messageQueue) {
-          handleMessage(m).catch(err => console.error("Error en mensaje encolado:", err.message));
+        // Limpiar keepalive si existe
+        if (global.keepAliveInterval) {
+          clearInterval(global.keepAliveInterval);
+          global.keepAliveInterval = null;
         }
-        global.messageQueue = [];
-      }, 10000);
 
-      // KeepAlive: actualizar presencia cada 10 min para que WhatsApp
-      // no cierre el WebSocket por inactividad (UptimeRobot solo hace HTTP)
-      if (global.keepAliveInterval) clearInterval(global.keepAliveInterval);
-      global.keepAliveInterval = setInterval(async () => {
-        try {
-          await sock.sendPresenceUpdate("available");
-          console.log("[KeepAlive] Presencia enviada a WhatsApp.");
-        } catch (e) {
-          console.warn("[KeepAlive] Error al enviar presencia:", e.message);
-        }
-      }, 10 * 60 * 1000); // cada 10 minutos
-
-      if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
-        // Esperar 20s para que las sesiones E2E se sincronicen antes de enviar
-        setTimeout(async () => {
-          try {
-            await sock.sendMessage(GRUPO_PERMITIDO, { text: "Sistema reiniciado" });
-            console.log("Mensaje de reinicio enviado al grupo.");
-          } catch (e) {
-            console.error("No se pudo notificar al grupo:", e.message);
+        if (shouldReconnect) {
+          // Código 440 = connectionReplaced: otra instancia se conectó con las mismas credenciales.
+          // Si reconectamos inmediatamente, las dos instancias se "patean" mutuamente en loop.
+          // Esperamos 30s para darle tiempo a Render de terminar la instancia antigua.
+          if (statusCode === 440) {
+            console.log("⚠️ [Conflict 440] Otra instancia activa detectada. Esperando 30s antes de reconectar...");
+            setTimeout(() => startBot(), 30000);
+            return;
           }
-        }, 20000);
-      }
-    }
-  });
 
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-    for (const m of messages) {
-      // Si el bot aún está en calentamiento, encolar el mensaje
-      if (!global.botReady) {
-        console.log("[Warmup] Mensaje encolado hasta que las sesiones E2E estén listas.");
-        global.messageQueue = global.messageQueue || [];
-        global.messageQueue.push(m);
-        continue;
-      }
-      try {
-        await handleMessage(m);
-      } catch (err) {
-        // Los errores de sesión Signal son normales tras reconexión post-hibernación;
-        // no es necesario actuar, Baileys los renegocia automáticamente.
-        if (err.name === "SessionError" || err.message?.includes("No sessions") || err.message?.includes("Bad MAC")) {
-          console.warn("[SessionError ignorado - renegociando E2E automaticamente]", err.message);
+          // Si Render nos mandó SIGTERM (está apagando esta instancia), NO reconectar
+          if (global.shuttingDown) {
+            console.log("🛑 Apagado en progreso — no se reconecta.");
+            return;
+          }
+
+          retryCount++;
+          // Backoff exponencial sin límite máximo de reintentos:
+          // 3s, 6s, 9s... hasta 60s de tope — nunca se rinde
+          const delay = Math.min(retryCount * 3000, 60000);
+          console.log(`Reconectando (intento #${retryCount}) en ${delay / 1000}s...`);
+          // Alertar si lleva varios intentos fallidos seguidos
+          if (retryCount === 5) {
+            await sendTelegramAlert(
+              `⚠️ *Bot con problemas de conexión*\n\n` +
+              `Lleva *${retryCount} intentos* fallidos reconectándose a WhatsApp.\n` +
+              `Código de error: \`${statusCode}\` — ${errorMsg}\n\n` +
+              `Seguirá intentando automáticamente. Si no se recupera en unos minutos, revisa los logs en Render.`
+            );
+          }
+          setTimeout(() => startBot(), delay);
         } else {
-          console.error("Error procesando mensaje:", err.message);
+          console.log("Sesión cerrada permanentemente (logged out). Borra la tabla baileys_auth en Supabase y reinicia.");
+          await sendTelegramAlert(
+            `❌ *Sesión cerrada permanentemente*\n\n` +
+            `WhatsApp cerró la sesión del bot (logged out).\n\n` +
+            `*Pasos para recuperar:*\n` +
+            `1. Ve a Supabase → tabla \`baileys_auth\` → borra todas las filas\n` +
+            `2. Reinicia el servicio en Render\n` +
+            `3. Escanea el QR que aparecerá en los logs`
+          );
         }
       }
-    }
-  });
+
+      if (connection === "open") {
+        const wasDown = retryCount > 0;
+        retryCount = 0;
+        console.log("✅ Bot conectado y listo!\n");
+        // Notificar reconexión solo si venía de un fallo (no al arranque inicial)
+        if (wasDown) {
+          await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nWhatsApp volvió a conectarse después de varios intentos.`);
+        }
+
+        // Período de calentamiento: esperar 10s para que las sesiones E2E se establezcan
+        // antes de procesar mensajes. Si alguien escribe durante ese período, se encola.
+        global.botReady = false;
+        global.messageQueue = [];
+        setTimeout(() => {
+          global.botReady = true;
+          console.log("[Warmup] Sesiones listas. Procesando mensajes encolados:", global.messageQueue.length);
+          for (const m of global.messageQueue) {
+            handleMessage(m).catch(err => console.error("Error en mensaje encolado:", err.message));
+          }
+          global.messageQueue = [];
+        }, 10000);
+
+        // KeepAlive: actualizar presencia cada 10 min para que WhatsApp
+        // no cierre el WebSocket por inactividad (UptimeRobot solo hace HTTP)
+        if (global.keepAliveInterval) clearInterval(global.keepAliveInterval);
+        global.keepAliveInterval = setInterval(async () => {
+          try {
+            await sock.sendPresenceUpdate("available");
+            console.log("[KeepAlive] Presencia enviada a WhatsApp.");
+          } catch (e) {
+            console.warn("[KeepAlive] Error al enviar presencia:", e.message);
+          }
+        }, 10 * 60 * 1000); // cada 10 minutos
+      }
+    });
+
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      if (type !== "notify") return;
+      for (const m of messages) {
+        // Si el bot aún está en calentamiento, encolar el mensaje
+        if (!global.botReady) {
+          console.log("[Warmup] Mensaje encolado hasta que las sesiones E2E estén listas.");
+          global.messageQueue = global.messageQueue || [];
+          global.messageQueue.push(m);
+          continue;
+        }
+        try {
+          await handleMessage(m);
+        } catch (err) {
+          // Los errores de sesión Signal son normales tras reconexión post-hibernación;
+          // no es necesario actuar, Baileys los renegocia automáticamente.
+          if (err.name === "SessionError" || err.message?.includes("No sessions") || err.message?.includes("Bad MAC")) {
+            console.warn("[SessionError ignorado - renegociando E2E automaticamente]", err.message);
+          } else {
+            console.error("Error procesando mensaje:", err.message);
+          }
+        }
+      }
+    });
 
   } catch (err) {
     console.error("❌ Error fatal al iniciar el bot:", err.message);
@@ -880,12 +868,16 @@ async function startBot() {
 
 let retryCount = 0;
 console.log("Iniciando bot con Baileys (Sin Chrome, ultra-ligero)...");
-startBot();
+// Delay de 15s antes de conectar a WhatsApp para evitar el conflicto 440 en deploys.
+// Render tarda ~2-5s en enviar SIGTERM al pod viejo tras declarar este pod "healthy".
+// Con 15s de margen el pod viejo ya está muerto cuando este intenta conectar.
+console.log("Esperando 15s para que la instancia anterior se cierre (anti-conflicto deploy)...");
+setTimeout(() => startBot(), 15000);
 
 // ==================== APAGADO LIMPIO (SIGTERM) ====================
 // Render manda SIGTERM a la instancia vieja durante un deploy antes de matarla.
 // Si no lo manejamos, la instancia vieja reconecta y pelea con la nueva (loop 440).
-async function shutdown(signal) {
+async function shutdown (signal) {
   console.log(`\n[${signal}] Apagando instancia limpiamente...`);
   global.shuttingDown = true;
   if (global.keepAliveInterval) {
@@ -894,9 +886,9 @@ async function shutdown(signal) {
   }
   try {
     if (sock) sock.end(); // Cierra el WebSocket de WA sin reconectar
-  } catch (_) {}
+  } catch (_) { }
   setTimeout(() => process.exit(0), 1500); // Salir tras 1.5s por si algo tarda
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM")); // Deploy de Render
-process.on("SIGINT",  () => shutdown("SIGINT"));  // Ctrl+C local
+process.on("SIGINT", () => shutdown("SIGINT"));  // Ctrl+C local
