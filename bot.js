@@ -683,16 +683,25 @@ async function startBot() {
 
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const errorMsg = lastDisconnect?.error?.message || "Desconocido";
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log("Conexión cerrada. Reconectar:", shouldReconnect);
+      console.log(`Conexión cerrada. Código: ${statusCode} | Error: ${errorMsg} | Reconectar: ${shouldReconnect}`);
       if (shouldReconnect) {
-        startBot();
+        retryCount++;
+        if (retryCount > 10) {
+          console.log("⛔ Máximo de reintentos alcanzado (10). Reinicia manualmente desde Render.");
+          return;
+        }
+        const delay = Math.min(retryCount * 3000, 15000);
+        console.log(`Reintento #${retryCount} en ${delay / 1000} segundos...`);
+        setTimeout(() => startBot(), delay);
       } else {
         console.log("Sesión cerrada permanentemente. Borra la tabla baileys_auth en Supabase y reinicia.");
       }
     }
 
     if (connection === "open") {
+      retryCount = 0;
       console.log("✅ Bot conectado y listo!\n");
       if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
         setTimeout(async () => {
@@ -719,5 +728,6 @@ async function startBot() {
   });
 }
 
+let retryCount = 0;
 console.log("Iniciando bot con Baileys (Sin Chrome, ultra-ligero)...");
 startBot();
