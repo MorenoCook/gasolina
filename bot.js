@@ -2,6 +2,7 @@ require("dotenv").config();
 const {
   default: makeWASocket,
   DisconnectReason,
+  fetchLatestBaileysVersion,
   initAuthCreds,
   BufferJSON,
   proto
@@ -658,14 +659,22 @@ async function handleMessage(msg) {
 
 // ==================== ARRANQUE DEL BOT ====================
 async function startBot() {
-  const { state, saveCreds } = await useSupabaseAuthState();
+  try {
+    console.log("Cargando auth state desde Supabase...");
+    const { state, saveCreds } = await useSupabaseAuthState();
+    console.log("Auth state cargado. Obteniendo versión de WhatsApp...");
 
-  sock = makeWASocket({
-    auth: state,
-    logger: P({ level: "silent" }),
-    printQRInTerminal: false,
-    browser: ["GasolinaBot", "Chrome", "1.0.0"]
-  });
+    const { version } = await fetchLatestBaileysVersion();
+    console.log("Versión de WA:", version);
+
+    sock = makeWASocket({
+      auth: state,
+      version,
+      logger: P({ level: "warn" }),
+      printQRInTerminal: false,
+      browser: ["GasolinaBot", "Chrome", "1.0.0"],
+      connectTimeoutMs: 60000
+    });
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -726,6 +735,16 @@ async function startBot() {
       }
     }
   });
+
+  } catch (err) {
+    console.error("❌ Error fatal al iniciar el bot:", err.message);
+    retryCount++;
+    if (retryCount <= 10) {
+      const delay = Math.min(retryCount * 3000, 15000);
+      console.log(`Reintento #${retryCount} en ${delay / 1000} segundos...`);
+      setTimeout(() => startBot(), delay);
+    }
+  }
 }
 
 let retryCount = 0;
