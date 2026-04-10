@@ -4,7 +4,8 @@
   "description": "Bot de WhatsApp para calcular rendimiento de gasolina",
   "main": "index.js",
   "scripts": {
-    "start": "node --max-old-space-size=150 bot.js"
+    "start": "node --max-old-space-size=150 bot.js",
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.78.0",
