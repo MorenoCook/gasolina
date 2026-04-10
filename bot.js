@@ -752,6 +752,12 @@ async function startBot() {
           return;
         }
 
+        // Si Render nos mandó SIGTERM (está apagando esta instancia), NO reconectar
+        if (global.shuttingDown) {
+          console.log("🛑 Apagado en progreso — no se reconecta.");
+          return;
+        }
+
         retryCount++;
         // Backoff exponencial sin límite máximo de reintentos:
         // 3s, 6s, 9s... hasta 60s de tope — nunca se rinde
@@ -844,3 +850,22 @@ async function startBot() {
 let retryCount = 0;
 console.log("Iniciando bot con Baileys (Sin Chrome, ultra-ligero)...");
 startBot();
+
+// ==================== APAGADO LIMPIO (SIGTERM) ====================
+// Render manda SIGTERM a la instancia vieja durante un deploy antes de matarla.
+// Si no lo manejamos, la instancia vieja reconecta y pelea con la nueva (loop 440).
+async function shutdown(signal) {
+  console.log(`\n[${signal}] Apagando instancia limpiamente...`);
+  global.shuttingDown = true;
+  if (global.keepAliveInterval) {
+    clearInterval(global.keepAliveInterval);
+    global.keepAliveInterval = null;
+  }
+  try {
+    if (sock) sock.end(); // Cierra el WebSocket de WA sin reconectar
+  } catch (_) {}
+  setTimeout(() => process.exit(0), 1500); // Salir tras 1.5s por si algo tarda
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM")); // Deploy de Render
+process.on("SIGINT",  () => shutdown("SIGINT"));  // Ctrl+C local
