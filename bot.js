@@ -112,9 +112,15 @@ async function backupAuthToSupabase() {
     const folderData = {};
     for (const file of files) {
       if (file.endsWith(".json")) {
-        const filePath = path.join(AUTH_FOLDER, file);
-        const content = fs.readFileSync(filePath, "utf-8");
-        folderData[file] = JSON.parse(content);
+        try {
+          const filePath = path.join(AUTH_FOLDER, file);
+          const content = fs.readFileSync(filePath, "utf-8");
+          if (content) {
+            folderData[file] = JSON.parse(content);
+          }
+        } catch (err) {
+          // Si un archivo está siendo modificado justo en este instante, lo saltamos
+        }
       }
     }
     const { error } = await supabase.from("baileys_auth").upsert([{ key: "backup_folder", value: folderData }]);
@@ -801,8 +807,8 @@ async function startBot () {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      // Presentarse como navegador estándar — compatibilidad con versiones viejas de WA
-      browser: Browsers.ubuntu("Chrome"),
+      // Presentarse con MacOS Desktop — suele acelerar el proceso de "Logging in" en Meta
+      browser: Browsers.macOS("Desktop"),
       syncFullHistory: false,
       // Si alguien pide retrasmisión, buscar en cache en lugar de pedir a WA
       // Evita timeouts 408 causados por usuarios con versiones viejas
