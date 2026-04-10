@@ -1,17 +1,8 @@
 require("dotenv").config();
-const {
-  default: makeWASocket,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  initAuthCreds,
-  BufferJSON,
-  proto,
-  makeCacheableSignalKeyStore
-} = require("@whiskeysockets/baileys");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
-const P = require("pino");
 
 // ==================== CONFIGURACIÓN ====================
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -60,79 +51,7 @@ async function sendTelegramAlert (message) {
   }
 }
 
-// ==================== AUTH STATE CON SUPABASE ====================
-async function useSupabaseAuthState () {
-  const write = async (key, data) => {
-    const val = JSON.stringify(data, BufferJSON.replacer);
-    const { error } = await supabase.from("baileys_auth").upsert([{ key, value: val }]);
-    if (error) console.error(`[Supabase Auth] Error escribiendo ${key}:`, error.message);
-  };
-
-  const read = async (key) => {
-    const { data, error } = await supabase
-      .from("baileys_auth")
-      .select("value")
-      .eq("key", key)
-      .single();
-    if (error && error.code !== "PGRST116") {
-      // PGRST116 is "Row not found", which is normal
-      console.error(`[Supabase Auth] Error leyendo ${key}:`, error.message);
-    }
-    if (!data?.value) return null;
-    try {
-      return JSON.parse(data.value, BufferJSON.reviver);
-    } catch (e) {
-      console.error(`[Supabase Auth] Error parseando ${key}:`, e.message);
-      return null;
-    }
-  };
-
-  const del = async (key) => {
-    const { error } = await supabase.from("baileys_auth").delete().eq("key", key);
-    if (error) console.error(`[Supabase Auth] Error borrando ${key}:`, error.message);
-  };
-
-  let creds = await read("creds");
-  if (!creds) creds = initAuthCreds();
-
-  return {
-    state: {
-      creds,
-      keys: makeCacheableSignalKeyStore(
-        {
-          get: async (type, ids) => {
-            const result = {};
-            await Promise.all(
-              ids.map(async (id) => {
-                let val = await read(`${type}-${id}`);
-                if (val) {
-                  if (type === "app-state-sync-key") {
-                    val = proto.Message.AppStateSyncKeyData.fromObject(val);
-                  }
-                  result[id] = val;
-                }
-              })
-            );
-            return result;
-          },
-          set: async (data) => {
-            for (const [type, entries] of Object.entries(data)) {
-              for (const [id, value] of Object.entries(entries)) {
-                if (value) {
-                  await write(`${type}-${id}`, value);
-                } else {
-                  await del(`${type}-${id}`);
-                }
-              }
-            }
-          }
-        },
-        P({ level: "warn" })
-      )
-    },
-    saveCreds: () => write("creds", creds)
-  };
-}
+// ==================== (AUTH STATE REMOVIDO PARA USAR LOCALAUTH) ====================
 
 // ==================== FUNCIONES DE DATOS (SUPABASE) ====================
 async function appendCSV (row) {
@@ -279,52 +198,34 @@ function buildAlertas (car, km) {
   return alertas;
 }
 
-// ==================== EXTRACTOR DE TEXTO (BAILEYS) ====================
-function getMessageText (msg) {
-  return (
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    msg.message?.imageMessage?.caption ||
-    msg.message?.videoMessage?.caption ||
-    ""
-  );
-}
-
 // ==================== BOT PRINCIPAL ====================
-let sock;
+let client;
 
-async function reply (chatId, text, quotedMsg) {
+async function reply (chatId, text, msg) {
   try {
-    await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
-  } catch (err) {
-    if (err.message?.includes("No sessions") || err.name === "SessionError") {
-      console.warn(`[reply] No sessions en ${chatId} — forzando metadata y reintentando en 5s...`);
-      // Forzar a Baileys a descargar la lista de participantes del grupo
-      if (chatId.endsWith("@g.us")) {
-        try {
-          const meta = await sock.groupMetadata(chatId);
-          console.log(`[debug] groupMetadata fetch exitoso. Participantes: ${meta.participants?.length}`);
-        } catch (e) {
-          console.warn("Fallo groupMetadata:", e.message);
-        }
-      }
-      await new Promise(r => setTimeout(r, 5000));
-      await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
+    if (msg) {
+      await msg.reply(text);
     } else {
-      throw err;
+      await client.sendMessage(chatId, text);
     }
+  } catch (err) {
+    console.error("Error enviando mensaje:", err.message);
   }
 }
 
 async function handleMessage (msg) {
-  const chatId = msg.key.remoteJid;
+  const chatId = msg.from;
   if (!chatId || chatId === "status@broadcast" || chatId.includes("@newsletter")) return;
 
-  const body = getMessageText(msg).trim();
+  if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "" && chatId !== GRUPO_PERMITIDO && !msg.fromMe) {
+    return;
+  }
+
+  const body = msg.body?.trim();
   if (!body) return;
 
   // Ignorar las respuestas automáticas del propio bot
-  if (msg.key.fromMe) {
+  if (msg.fromMe) {
     const isBotReply =
       /⛽|❌|✅|📝|✓|━━━━━━━━|🛢️|🚨|⚠️/i.test(body) ||
       body.includes("Bot de Gasolina") ||
@@ -720,223 +621,107 @@ async function handleMessage (msg) {
   }
 }
 
-// ==================== ARRANQUE DEL BOT ====================
+// ==================== ARRANQUE DEL BOT (WHATSAPP-WEB.JS) ====================
+let retryCount = 0;
+
 async function startBot () {
   try {
-    console.log("Cargando auth state desde Supabase...");
-    const { state, saveCreds } = await useSupabaseAuthState();
-    console.log("Auth state cargado. Obteniendo versión de WhatsApp...");
+    console.log("Iniciando bot con whatsapp-web.js (Chrome optimizado para Render)...");
 
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`Versión de WA: ${version} (isLatest: ${isLatest})`);
-
-    // Caché de reintentos en memoria (soluciona Invalid PreKey y No sessions)
-    // Permite que Baileys le pida al remitente renegociar la sesión si falla al inicio.
-    const msgRetryCounterMap = new Map();
-    const msgRetryCounterCache = {
-      get: (key) => msgRetryCounterMap.get(key),
-      set: (key, value) => msgRetryCounterMap.set(key, value)
-    };
-
-    sock = makeWASocket({
-      auth: state,
-      version,
-      logger: P({ level: "warn" }),
-      printQRInTerminal: false,
-      browser: ["Ubuntu", "Chrome", "20.0.04"],
-      connectTimeoutMs: 60000,
-      // Reintentar peticiones fallidas con un delay para evitar ban temporal
-      retryRequestDelayMs: 2000,
-      // Requerido para curar sesiones de grupos (No sessions / Invalid PreKey)
-      msgRetryCounterCache,
-      getMessage: async (key) => {
-        // Fallback básico para que Baileys sepa que debe pedir un reintento
-        return { conversation: "Buscando mensaje..." };
+    client = new Client({
+      authStrategy: new LocalAuth(),
+      puppeteer: {
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-accelerated-2d-canvas",
+          "--no-first-run",
+          "--no-zygote",
+          "--single-process", // Crítico para no superar los 512MB de Render
+          "--disable-gpu"
+        ]
       }
     });
 
-    sock.ev.on("creds.update", saveCreds);
+    client.on("qr", async (qr) => {
+      console.log("\n📱 Escanea este QR con WhatsApp:\n");
+      qrcode.generate(qr, { small: true });
+      const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
+      console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
+      console.log(qrLink);
+      console.log("");
+      
+      await sendTelegramAlert(
+        `🚨 *Sesión expirada / QR Requerido*\n\n` +
+        `El bot necesita escanear el código QR.\n\n` +
+        `📷 [Ver QR en alta resolución](${qrLink})\n\n` +
+        `Abre ese link desde el celular y escanéalo con WhatsApp.`
+      );
+    });
 
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        console.log("\n📱 Escanea este QR con WhatsApp:\n");
-        qrcode.generate(qr, { small: true });
-        const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
-        console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
-        console.log(qrLink);
-        console.log("");
-        // 🚨 La sesión expiró — se necesita escanear el QR manualmente
-        await sendTelegramAlert(
-          `🚨 *Sesión expirada — acción requerida*\n\n` +
-          `El bot necesita que escanees el QR para reconectarse.\n\n` +
-          `📷 [Ver QR en alta resolución](${qrLink})\n\n` +
-          `Abre ese link desde el celular y escanéalo con WhatsApp.`
-        );
+    client.on("ready", async () => {
+      console.log("✅ Bot conectado y listo!\n");
+      if (retryCount > 0) {
+        await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nChrome inició sesión tras previos fallos.`);
       }
+      retryCount = 0;
 
-      if (connection === "close") {
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const errorMsg = lastDisconnect?.error?.message || "Desconocido";
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        console.log(`Conexión cerrada. Código: ${statusCode} | Error: ${errorMsg} | Reconectar: ${shouldReconnect}`);
-
-        // Limpiar keepalive si existe
-        if (global.keepAliveInterval) {
-          clearInterval(global.keepAliveInterval);
-          global.keepAliveInterval = null;
-        }
-
-        if (shouldReconnect) {
-          // Código 440 = connectionReplaced: otra instancia se conectó con las mismas credenciales.
-          // Si reconectamos inmediatamente, las dos instancias se "patean" mutuamente en loop.
-          // Esperamos 30s para darle tiempo a Render de terminar la instancia antigua.
-          if (statusCode === 440) {
-            console.log("⚠️ [Conflict 440] Otra instancia activa detectada. Esperando 30s antes de reconectar...");
-            setTimeout(() => startBot(), 30000);
-            return;
-          }
-
-          // Si Render nos mandó SIGTERM (está apagando esta instancia), NO reconectar
-          if (global.shuttingDown) {
-            console.log("🛑 Apagado en progreso — no se reconecta.");
-            return;
-          }
-
-          retryCount++;
-          // Backoff exponencial sin límite máximo de reintentos:
-          // 3s, 6s, 9s... hasta 60s de tope — nunca se rinde
-          const delay = Math.min(retryCount * 3000, 60000);
-          console.log(`Reconectando (intento #${retryCount}) en ${delay / 1000}s...`);
-          // Alertar si lleva varios intentos fallidos seguidos
-          if (retryCount === 5) {
-            await sendTelegramAlert(
-              `⚠️ *Bot con problemas de conexión*\n\n` +
-              `Lleva *${retryCount} intentos* fallidos reconectándose a WhatsApp.\n` +
-              `Código de error: \`${statusCode}\` — ${errorMsg}\n\n` +
-              `Seguirá intentando automáticamente. Si no se recupera en unos minutos, revisa los logs en Render.`
-            );
-          }
-          setTimeout(() => startBot(), delay);
-        } else {
-          console.log("Sesión cerrada permanentemente (logged out). Borra la tabla baileys_auth en Supabase y reinicia.");
-          await sendTelegramAlert(
-            `❌ *Sesión cerrada permanentemente*\n\n` +
-            `WhatsApp cerró la sesión del bot (logged out).\n\n` +
-            `*Pasos para recuperar:*\n` +
-            `1. Ve a Supabase → tabla \`baileys_auth\` → borra todas las filas\n` +
-            `2. Reinicia el servicio en Render\n` +
-            `3. Escanea el QR que aparecerá en los logs`
-          );
-        }
-      }
-
-      if (connection === "open") {
-        const wasDown = retryCount > 0;
-        retryCount = 0;
-        console.log("✅ Bot conectado y listo!\n");
-        // Notificar reconexión solo si venía de un fallo (no al arranque inicial)
-        if (wasDown) {
-          await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nWhatsApp volvió a conectarse después de varios intentos.`);
-        }
-
-        // Período de calentamiento: esperar 10s para que las sesiones E2E se establezcan
-        // antes de procesar mensajes. Si alguien escribe durante ese período, se encola.
-        global.botReady = false;
-        global.messageQueue = [];
-        setTimeout(() => {
-          global.botReady = true;
-          console.log("[Warmup] Sesiones listas. Procesando mensajes encolados:", global.messageQueue.length);
-          for (const m of global.messageQueue) {
-            handleMessage(m).catch(err => console.error("Error en mensaje encolado:", err.message));
-          }
-          global.messageQueue = [];
-        }, 10000);
-
-        // KeepAlive: actualizar presencia cada 10 min para que WhatsApp
-        // no cierre el WebSocket por inactividad (UptimeRobot solo hace HTTP)
-        if (global.keepAliveInterval) clearInterval(global.keepAliveInterval);
-        global.keepAliveInterval = setInterval(async () => {
+      // Intentar notificar al grupo si está configurado
+      if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
+        setTimeout(async () => {
           try {
-            await sock.sendPresenceUpdate("available");
-            console.log("[KeepAlive] Presencia enviada a WhatsApp.");
+            await reply(GRUPO_PERMITIDO, "Sistema reiniciado", null);
+            console.log("Mensaje de reinicio enviado al grupo.");
           } catch (e) {
-            console.warn("[KeepAlive] Error al enviar presencia:", e.message);
+            console.error("No se pudo notificar al grupo:", e.message);
           }
-        }, 10 * 60 * 1000); // cada 10 minutos
-
-        if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
-          // Esperar 15s para que las sesiones E2E se sincronicen antes de enviar
-          // Usamos la función reply() porque tiene manejo automático de "No sessions"
-          setTimeout(async () => {
-            try {
-              await reply(GRUPO_PERMITIDO, "Sistema reiniciado");
-              console.log("Mensaje de reinicio enviado al grupo.");
-            } catch (e) {
-              console.error("No se pudo notificar al grupo:", e.message);
-            }
-          }, 15000);
-        }
+        }, 5000);
       }
     });
 
-    sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      if (type !== "notify") return;
-      for (const m of messages) {
-        // Si el bot aún está en calentamiento, encolar el mensaje
-        if (!global.botReady) {
-          console.log("[Warmup] Mensaje encolado hasta que las sesiones E2E estén listas.");
-          global.messageQueue = global.messageQueue || [];
-          global.messageQueue.push(m);
-          continue;
-        }
-        try {
-          await handleMessage(m);
-        } catch (err) {
-          // Los errores de sesión Signal son normales tras reconexión post-hibernación;
-          // no es necesario actuar, Baileys los renegocia automáticamente.
-          if (err.name === "SessionError" || err.message?.includes("No sessions") || err.message?.includes("Bad MAC")) {
-            console.warn("[SessionError ignorado - renegociando E2E automaticamente]", err.message);
-          } else {
-            console.error("Error procesando mensaje:", err.message);
-          }
-        }
+    client.on("disconnected", async (reason) => {
+      console.log("Sesión cerrada (logged out):", reason);
+      await sendTelegramAlert(
+        `❌ *Sesión desconectada*\n\n` +
+        `Motivo: ${reason}\n\n` +
+        `Deberás forzar un Manual Deploy en Render y buscar el nuevo QR en los logs.`
+      );
+    });
+
+    client.on("message", async (msg) => {
+      try {
+        await handleMessage(msg);
+      } catch (err) {
+        console.error("Error procesando mensaje:", err.message);
       }
     });
+
+    client.initialize();
 
   } catch (err) {
     console.error("❌ Error fatal al iniciar el bot:", err.message);
     retryCount++;
-    const delay = Math.min(retryCount * 3000, 60000);
+    const delay = Math.min(retryCount * 5000, 60000);
     console.log(`Reintento #${retryCount} en ${delay / 1000}s...`);
     setTimeout(() => startBot(), delay);
   }
 }
 
-let retryCount = 0;
-console.log("Iniciando bot con Baileys (Sin Chrome, ultra-ligero)...");
-// Delay de 15s antes de conectar a WhatsApp para evitar el conflicto 440 en deploys.
-// Render tarda ~2-5s en enviar SIGTERM al pod viejo tras declarar este pod "healthy".
-// Con 15s de margen el pod viejo ya está muerto cuando este intenta conectar.
+// Retrasar 15s antes de inicializar Puppeteer para evitar conflictos de "kill" de Render
 console.log("Esperando 15s para que la instancia anterior se cierre (anti-conflicto deploy)...");
 setTimeout(() => startBot(), 15000);
 
 // ==================== APAGADO LIMPIO (SIGTERM) ====================
-// Render manda SIGTERM a la instancia vieja durante un deploy antes de matarla.
-// Si no lo manejamos, la instancia vieja reconecta y pelea con la nueva (loop 440).
 async function shutdown (signal) {
   console.log(`\n[${signal}] Apagando instancia limpiamente...`);
   global.shuttingDown = true;
-  if (global.keepAliveInterval) {
-    clearInterval(global.keepAliveInterval);
-    global.keepAliveInterval = null;
-  }
   try {
-    if (sock) sock.end(); // Cierra el WebSocket de WA sin reconectar
+    if (client) await client.destroy(); // Cierra Puppeteer ordenadamente
   } catch (_) { }
-  setTimeout(() => process.exit(0), 1500); // Salir tras 1.5s por si algo tarda
+  setTimeout(() => process.exit(0), 1500);
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM")); // Deploy de Render
-process.on("SIGINT", () => shutdown("SIGINT"));  // Ctrl+C local
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
