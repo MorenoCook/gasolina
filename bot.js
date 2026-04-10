@@ -1,15 +1,8 @@
 require("dotenv").config();
-const {
-  default: makeWASocket,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  useMultiFileAuthState,
-  makeCacheableSignalKeyStore
-} = require("@whiskeysockets/baileys");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
-const P = require("pino");
 
 // ==================== CONFIGURACIÓN ====================
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -205,55 +198,34 @@ function buildAlertas (car, km) {
   return alertas;
 }
 
-// ==================== EXTRACTOR DE TEXTO (BAILEYS) ====================
-function getMessageText (msg) {
-  return (
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    msg.message?.imageMessage?.caption ||
-    msg.message?.videoMessage?.caption ||
-    ""
-  );
-}
-
 // ==================== BOT PRINCIPAL ====================
-let sock;
+let client;
 
-async function reply (chatId, text, quotedMsg) {
+async function reply (chatId, text, msg) {
   try {
-    await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
-  } catch (err) {
-    if (err.message?.includes("No sessions") || err.name === "SessionError") {
-      console.warn(`[reply] No sessions en ${chatId} — forzando metadata y reintentando en 5s...`);
-      if (chatId.endsWith("@g.us")) {
-        try {
-          const meta = await sock.groupMetadata(chatId);
-          console.log(`[debug] groupMetadata fetch exitoso. Participantes: ${meta.participants?.length}`);
-        } catch (e) {
-          console.warn("Fallo groupMetadata:", e.message);
-        }
-      }
-      await new Promise(r => setTimeout(r, 5000));
-      await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
+    if (msg) {
+      await msg.reply(text);
     } else {
-      throw err;
+      await client.sendMessage(chatId, text);
     }
+  } catch (err) {
+    console.error("Error enviando mensaje:", err.message);
   }
 }
 
 async function handleMessage (msg) {
-  const chatId = msg.key?.remoteJid;
+  const chatId = msg.from;
   if (!chatId || chatId === "status@broadcast" || chatId.includes("@newsletter")) return;
 
-  if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "" && chatId !== GRUPO_PERMITIDO && !msg.key?.fromMe) {
+  if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "" && chatId !== GRUPO_PERMITIDO && !msg.fromMe) {
     return;
   }
 
-  const body = getMessageText(msg)?.trim();
+  const body = msg.body?.trim();
   if (!body) return;
 
   // Ignorar las respuestas automáticas del propio bot
-  if (msg.key?.fromMe) {
+  if (msg.fromMe) {
     const isBotReply =
       /⛽|❌|✅|📝|✓|━━━━━━━━|🛢️|🚨|⚠️/i.test(body) ||
       body.includes("Bot de Gasolina") ||
@@ -628,10 +600,10 @@ async function handleMessage (msg) {
     case "select_car_poliza": {
       const carMap = { 1: "car1", 2: "car2", 3: "car3" };
       const carKey = carMap[body];
-      if (!carKey) { await reply(chatId, "❌ Responde con 1, 2 o 3.", msg); return; }
+      if (!carKey) { await msg.reply("❌ Responde con 1, 2 o 3."); return; }
       session.carKey = carKey;
       session.step = "input_poliza";
-      await reply(chatId, `Seleccionaste ${cars[carKey].name}\n\nEscribe los datos de la póliza:\n(Ejemplo: GNP Poliza 12345 - Vence 15 Octubre)`, msg);
+      await msg.reply(`Seleccionaste ${cars[carKey].name}\n\nEscribe los datos de la póliza:\n(Ejemplo: GNP Poliza 12345 - Vence 15 Octubre)`);
       break;
     }
 
@@ -640,7 +612,7 @@ async function handleMessage (msg) {
       car.poliza = body.trim();
       await saveCars(cars);
       resetSession(chatId);
-      await reply(chatId, `Póliza guardada para ${car.name}:\n"${car.poliza}"\n\nPuedes consultarla enviando /seguros`, msg);
+      await msg.reply(`Póliza guardada para ${car.name}:\n"${car.poliza}"\n\nPuedes consultarla enviando /seguros`);
       break;
     }
 
@@ -649,165 +621,117 @@ async function handleMessage (msg) {
   }
 }
 
-// ==================== ARRANQUE DEL BOT ====================
+// ==================== ARRANQUE DEL BOT (WHATSAPP-WEB.JS ULTRA LIGERO) ====================
+let retryCount = 0;
+
 async function startBot () {
   try {
-    console.log("Cargando auth state desde disco local...");
-    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
-    console.log("Auth state listo. Obteniendo versión de WhatsApp...");
+    console.log("Iniciando bot con whatsapp-web.js (RAM Restringida)...");
 
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`Versión de WA: ${version} (isLatest: ${isLatest})`);
-
-    const msgRetryCounterMap = new Map();
-    const msgRetryCounterCache = {
-      get: (key) => msgRetryCounterMap.get(key),
-      set: (key, value) => msgRetryCounterMap.set(key, value)
-    };
-
-    sock = makeWASocket({
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, P({ level: "warn" }))
-      },
-      version,
-      logger: P({ level: "warn" }),
-      printQRInTerminal: false,
-      browser: ["Ubuntu", "Chrome", "20.0.04"],
-      connectTimeoutMs: 60000,
-      retryRequestDelayMs: 2000,
-      msgRetryCounterCache,
-      getMessage: async (key) => {
-        return { conversation: "Buscando mensaje..." };
+    client = new Client({
+      authStrategy: new LocalAuth(),
+      puppeteer: {
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-accelerated-2d-canvas",
+          "--no-first-run",
+          "--no-zygote",
+          "--single-process",
+          "--disable-gpu",
+          "--js-flags=--max-old-space-size=256",
+          "--disable-web-security",
+          "--disable-features=IsolateOrigins,site-per-process",
+          "--disable-site-isolation-trials",
+          "--disable-notifications",
+          "--disable-background-networking",
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-extensions",
+          "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+          "--disable-ipc-flooding-protection",
+          "--mute-audio"
+        ]
       }
     });
 
-    sock.ev.on("creds.update", saveCreds);
-
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        console.log("\n📱 Escanea este QR con WhatsApp:\n");
-        qrcode.generate(qr, { small: true });
-        const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
-        console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
-        console.log(qrLink);
-        console.log("");
+    client.on("qr", async (qr) => {
+      console.log("\n📱 Escanea este QR con WhatsApp:\n");
+      qrcode.generate(qr, { small: true });
+      const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
+      console.log("\n🔗 ¿No se ve bien? COPIA ESTE LINK para verlo en HD:\n");
+      console.log(qrLink);
+      console.log("");
+      
+      const now = Date.now();
+      if (!global.lastQrAlert || now - global.lastQrAlert > 5 * 60 * 1000) {
+        global.lastQrAlert = now;
         await sendTelegramAlert(
-          `🚨 *Sesión expirada — acción requerida*\n\n` +
-          `El bot necesita que escanees el QR para reconectarse.\n\n` +
+          `🚨 *Sesión expirada / QR Requerido*\n\n` +
+          `El bot necesita escanear el código QR.\n\n` +
           `📷 [Ver QR en alta resolución](${qrLink})\n\n` +
           `Abre ese link desde el celular y escanéalo con WhatsApp.`
         );
       }
+    });
 
-      if (connection === "close") {
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const errorMsg = lastDisconnect?.error?.message || "Desconocido";
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        console.log(`Conexión cerrada. Código: ${statusCode} | Error: ${errorMsg} | Reconectar: ${shouldReconnect}`);
-
-        if (global.keepAliveInterval) {
-          clearInterval(global.keepAliveInterval);
-          global.keepAliveInterval = null;
-        }
-
-        if (shouldReconnect) {
-          if (statusCode === 440) {
-            console.log("⚠️ [Conflict 440] Otra instancia activa detectada. Esperando 30s antes de reconectar...");
-            setTimeout(() => startBot(), 30000);
-            return;
-          }
-
-          if (global.shuttingDown) {
-            console.log("🛑 Apagado en progreso — no se reconecta.");
-            return;
-          }
-
-          retryCount++;
-          const delay = Math.min(retryCount * 5000, 60000);
-          console.log(`Reconectando (intento #${retryCount}) en ${delay / 1000}s...`);
-          if (retryCount === 5) {
-            await sendTelegramAlert(
-              `⚠️ *Bot con problemas de conexión*\n\n` +
-              `Lleva *${retryCount} intentos* fallidos reconectándose a WhatsApp.\n` +
-              `Código de error: \`${statusCode}\` — ${errorMsg}`
-            );
-          }
-          setTimeout(() => startBot(), delay);
-        } else {
-          console.log("Sesión cerrada permanentemente (logged out). Borra la carpeta de auth local en caso de que persista.");
-          await sendTelegramAlert(
-            `❌ *Sesión cerrada permanentemente*\n\n` +
-            `WhatsApp cerró la sesión del bot (logged out).\n\n` +
-            `Deberás escanear el nuevo QR en los logs para conectar de nuevo.`
-          );
-        }
+    client.on("ready", async () => {
+      console.log("✅ Bot conectado y listo!\n");
+      if (retryCount > 0) {
+        await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nChrome inició sesión tras previos fallos.`);
       }
+      retryCount = 0;
 
-      if (connection === "open") {
-        const wasDown = retryCount > 0;
-        retryCount = 0;
-        console.log("✅ Bot conectado y listo!\n");
-        if (wasDown) {
-          await sendTelegramAlert(`✅ *Bot reconectado exitosamente*\nWhatsApp volvió a conectarse después de varios intentos.`);
-        }
-
-        global.botReady = false;
-        global.messageQueue = [];
-        setTimeout(() => {
-          global.botReady = true;
-          console.log("[Warmup] Sesiones listas. Procesando mensajes encolados:", global.messageQueue.length);
-          for (const m of global.messageQueue) {
-            handleMessage(m).catch(err => console.error("Error en mensaje encolado:", err.message));
-          }
-          global.messageQueue = [];
-        }, 10000);
-
-        if (global.keepAliveInterval) clearInterval(global.keepAliveInterval);
-        global.keepAliveInterval = setInterval(async () => {
-          try {
-            await sock.sendPresenceUpdate("available");
-            console.log("[KeepAlive] Presencia enviada a WhatsApp.");
-          } catch (e) {
-            console.warn("[KeepAlive] Error al enviar presencia:", e.message);
-          }
-        }, 10 * 60 * 1000);
-
-        if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
-          setTimeout(async () => {
-            try {
-              await reply(GRUPO_PERMITIDO, "Sistema reiniciado");
-              console.log("Mensaje de reinicio enviado al grupo.");
-            } catch (e) {
-              console.error("No se pudo notificar al grupo:", e.message);
+      try {
+        const page = await client.pupPage;
+        if (page) {
+          await page.setRequestInterception(true);
+          page.on("request", (req) => {
+            const rt = req.resourceType();
+            if (["image", "stylesheet", "font", "media"].includes(rt)) {
+              req.abort();
+            } else {
+              req.continue();
             }
-          }, 15000);
+          });
+          console.log("[Optimize] Bloqueo de multimedia/CSS activado en Chromium.");
         }
+      } catch (e) {
+        console.log("No se pudo inyectar el bloqueador de red:", e.message);
+      }
+
+      if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
+        setTimeout(async () => {
+          try {
+            await client.sendMessage(GRUPO_PERMITIDO, "Sistema reiniciado");
+            console.log("Mensaje de reinicio enviado al grupo.");
+          } catch (e) {
+            console.error("No se pudo notificar al grupo:", e.message);
+          }
+        }, 5000);
       }
     });
 
-    sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      if (type !== "notify") return;
-      for (const m of messages) {
-        if (!global.botReady) {
-          console.log("[Warmup] Mensaje encolado hasta que las sesiones E2E estén listas.");
-          global.messageQueue = global.messageQueue || [];
-          global.messageQueue.push(m);
-          continue;
-        }
-        try {
-          await handleMessage(m);
-        } catch (err) {
-          if (err.name === "SessionError" || err.message?.includes("No sessions") || err.message?.includes("Bad MAC")) {
-            console.warn("[SessionError ignorado - renegociando E2E automaticamente]", err.message);
-          } else {
-            console.error("Error procesando mensaje:", err.message);
-          }
-        }
+    client.on("disconnected", async (reason) => {
+      console.log("Sesión cerrada (logged out):", reason);
+      await sendTelegramAlert(
+        `❌ *Sesión desconectada*\n\n` +
+        `Motivo: ${reason}\n\n` +
+        `Deberás forzar un Manual Deploy en Render y buscar el nuevo QR en los logs.`
+      );
+    });
+
+    client.on("message", async (msg) => {
+      try {
+        await handleMessage(msg);
+      } catch (err) {
+        console.error("Error procesando mensaje:", err.message);
       }
     });
+
+    client.initialize();
 
   } catch (err) {
     console.error("❌ Error fatal al iniciar el bot:", err.message);
@@ -818,9 +742,6 @@ async function startBot () {
   }
 }
 
-let retryCount = 0;
-console.log("Iniciando bot con Baileys (MultiFileAuthState local)...");
-// Retrasar 15s antes de inicializar para evitar conflictos de "kill" de Render
 console.log("Esperando 15s para que la instancia anterior se cierre (anti-conflicto deploy)...");
 setTimeout(() => startBot(), 15000);
 
@@ -828,12 +749,8 @@ setTimeout(() => startBot(), 15000);
 async function shutdown (signal) {
   console.log(`\n[${signal}] Apagando instancia limpiamente...`);
   global.shuttingDown = true;
-  if (global.keepAliveInterval) {
-    clearInterval(global.keepAliveInterval);
-    global.keepAliveInterval = null;
-  }
   try {
-    if (sock) sock.end();
+    if (client) await client.destroy();
   } catch (_) { }
   setTimeout(() => process.exit(0), 1500);
 }
