@@ -281,9 +281,12 @@ async function reply (chatId, text, quotedMsg) {
   try {
     await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
   } catch (err) {
-    // Si las sesiones E2E aún no están listas, reintenta una vez después de 5s
     if (err.message?.includes("No sessions") || err.name === "SessionError") {
-      console.warn("[reply] No sessions — reintentando en 5s...");
+      console.warn(`[reply] No sessions en ${chatId} — forzando metadata y reintentando en 5s...`);
+      // Forzar a Baileys a descargar la lista de participantes del grupo
+      if (chatId.endsWith("@g.us")) {
+        try { await sock.groupMetadata(chatId); } catch (e) { console.warn("Fallo groupMetadata:", e.message); }
+      }
       await new Promise(r => setTimeout(r, 5000));
       await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
     } else {
