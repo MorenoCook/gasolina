@@ -4,15 +4,14 @@
   "description": "Bot de WhatsApp para calcular rendimiento de gasolina",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node bot.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.78.0",
+    "@whiskeysockets/baileys": "^6.17.16",
     "dotenv": "^17.4.1",
     "express": "^5.2.1",
-    "pg": "^8.20.0",
-    "qrcode-terminal": "^0.12.0",
-    "whatsapp-web.js": "^1.26.1",
-    "wwebjs-postgres": "^1.0.0"
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0"
   }
 }
