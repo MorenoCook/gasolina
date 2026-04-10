@@ -720,9 +720,6 @@ async function startBot () {
       printQRInTerminal: false,
       browser: ["GasolinaBot", "Chrome", "1.0.0"],
       connectTimeoutMs: 60000,
-      // Evitar sincronización completa del historial al reconectar
-      // (reduce la carga de claves Signal y errores de init queries)
-      syncFullHistory: false,
       // Reintentar peticiones fallidas con un delay para evitar ban temporal
       retryRequestDelayMs: 2000
     });
