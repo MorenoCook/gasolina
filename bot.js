@@ -80,11 +80,21 @@ async function useSupabaseAuthState() {
   }
 
   async function writeData(key, value) {
-    await supabase.from(TABLE).upsert([{ key, value }]);
+    try {
+      const { error } = await supabase.from(TABLE).upsert([{ key, value }]);
+      if (error) console.warn(`[Supabase] Error al guardar '${key}':`, error.message);
+    } catch (e) {
+      console.warn(`[Supabase] writeData falló para '${key}':`, e.message);
+    }
   }
 
   async function removeData(key) {
-    await supabase.from(TABLE).delete().eq("key", key);
+    try {
+      const { error } = await supabase.from(TABLE).delete().eq("key", key);
+      if (error) console.warn(`[Supabase] Error al borrar '${key}':`, error.message);
+    } catch (e) {
+      console.warn(`[Supabase] removeData falló para '${key}':`, e.message);
+    }
   }
 
   const stored = await readData("creds");
@@ -749,6 +759,9 @@ async function startBot() {
 
     // Conexión, QR y reconexión
     sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+      // Log every state change for diagnostics
+      console.log(`[Conexión] estado=${connection ?? "(actualizando)"} código=${lastDisconnect?.error?.output?.statusCode ?? "-"}`);
+
       if (qr) {
         console.log("\n📱 Escanea este QR con WhatsApp:\n");
         qrcode.generate(qr, { small: true });
