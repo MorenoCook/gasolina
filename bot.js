@@ -765,9 +765,17 @@ async function startBot () {
     // Usar Auth ultrarrápido local en disco para que no haya timeouts
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     
-    // Backup periódico silencioso hacia Supabase cada 3 minutos 
-    // (o al hacer un saveCreds). Esto salva la vida en redeploys de Render.
-    setInterval(backupAuthToSupabase, 3 * 60 * 1000);
+    // Backup periódico constante (por si acaso)
+    setInterval(backupAuthToSupabase, 5 * 60 * 1000);
+
+    // Sistema de guardado a Supabase optimizado (debounce)
+    let backupTimeout = null;
+    const debouncedBackup = () => {
+      if (backupTimeout) clearTimeout(backupTimeout);
+      backupTimeout = setTimeout(() => {
+        backupAuthToSupabase();
+      }, 10000); // 10 segundos después del último cambio
+    };
 
     // Cache de mensajes recientes para retrasmisión (evita timeouts con WA viejos)
     const msgCache = new Map();
@@ -796,8 +804,11 @@ async function startBot () {
       ...(proxyAgent ? { agent: proxyAgent, fetchAgent: proxyAgent } : {}),
     });
 
-    // Guardar credenciales cuando cambien (persistencia en disco)
-    sock.ev.on("creds.update", saveCreds);
+    // Guardar credenciales cuando cambien (persistencia en disco y Supabase)
+    sock.ev.on("creds.update", async () => {
+      await saveCreds();
+      debouncedBackup();
+    });
 
     // Cachear mensajes enviados para retrasmisión
     sock.ev.on("messages.upsert", ({ messages }) => {
