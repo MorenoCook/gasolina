@@ -677,6 +677,9 @@ async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     console.log(`[Auth] Usando sesión en: ${AUTH_FOLDER}`);
 
+    // Cache de mensajes recientes para retrasmisión (evita timeouts con WA viejos)
+    const msgCache = new Map();
+
     sock = makeWASocket({
       version,
       logger,
@@ -687,14 +690,46 @@ async function startBot() {
       },
       // Presentarse como navegador estándar — compatibilidad con versiones viejas de WA
       browser: Browsers.ubuntu("Chrome"),
-      syncFullHistory: false,   // No descargar historial — ahorra RAM y tiempo
-      getMessage: async () => undefined,
+      syncFullHistory: false,
+      // Si alguien pide retrasmisión, buscar en cache en lugar de pedir a WA
+      // Evita timeouts 408 causados por usuarios con versiones viejas
+      getMessage: async (key) => {
+        const cached = msgCache.get(`${key.remoteJid}-${key.id}`);
+        return cached ?? { conversation: "" };
+      },
+      // Mantener conexión viva y no desconectar por inactividad
+      keepAliveIntervalMs: 30_000,
+      retryRequestDelayMs: 250,
       // Proxy residencial para evadir bloqueo de IPs de Render (opcional)
       ...(proxyAgent ? { agent: proxyAgent, fetchAgent: proxyAgent } : {}),
     });
 
-    // Guardar credenciales cuando cambien (persistencia en Supabase)
+    // Guardar credenciales cuando cambien (persistencia en disco)
     sock.ev.on("creds.update", saveCreds);
+
+    // Cachear mensajes enviados para retrasmisión
+    sock.ev.on("messages.upsert", ({ messages }) => {
+      for (const msg of messages) {
+        if (!msg.key?.id) continue;
+        msgCache.set(`${msg.key.remoteJid}-${msg.key.id}`, msg.message);
+        // Limitar cache a 200 mensajes para no crecer infinitamente
+        if (msgCache.size > 200) {
+          const firstKey = msgCache.keys().next().value;
+          msgCache.delete(firstKey);
+        }
+      }
+    });
+
+    // Manejar errores de descifrado (usuarios con WA muy viejo) sin caer
+    sock.ev.process((events) => {
+      if (events["messages.update"]) {
+        for (const update of events["messages.update"]) {
+          if (update.update?.messageStubType === 2) {
+            console.warn(`[Decrypt] No se pudo descifrar mensaje de ${update.key?.remoteJid} — versión WA incompatible (ignorando).`);
+          }
+        }
+      }
+    });
 
     // Conexión, QR y reconexión
     sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
