@@ -630,8 +630,11 @@ async function startBot () {
 
     client = new Client({
       authStrategy: new LocalAuth(),
+      authTimeoutMs: 120000, // Darle 2 minutos de tolerancia al CPU lento
+      qrMaxRetries: 5, // Reintentar el QR si falla la carga
       puppeteer: {
         headless: true,
+        timeout: 120000, // Darle 2 minutos a Chrome para abrir
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
