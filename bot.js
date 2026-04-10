@@ -124,25 +124,13 @@ async function useSupabaseAuthState () {
   async function writeData (key, value) {
     try {
       const payload = serializeForDB(value);
-      const { data, error } = await supabase
-        .from(TABLE).upsert([{ key, value: payload }]).select();
-        
-      if (error) {
-        console.warn(`\n❌ [SupabaseAuth] RECHAZADO: No se pudo guardar la llave '${key}' en la base de datos!`);
-        console.warn(`❌ [SupabaseAuth] Razón de Supabase:`, error.message, error.details || "");
-        console.warn(`❌ [SupabaseAuth] Hint: Revisa que baileys_auth no tenga RLS activado y que 'key' sea Primary Key.\n`);
-      } else {
-        console.log(`✅ [SupabaseAuth] Llave '${key}' guardada / actualizada en tabla baileys_auth.`);
-      }
-    } catch (e) {
-      console.warn(`\n❌ [SupabaseAuth] CRASH crítico intentando escribir '${key}':`, e.message, "\n");
-    }
+      const { error } = await supabase.from(TABLE).upsert([{ key, value: payload }]);
+      if (error) console.warn(`❌ [SupabaseAuth] Error guardando '${key}':`, error.message);
+    } catch (e) { /* silencioso */ }
   }
 
   async function removeData (key) {
-    try {
-      await supabase.from(TABLE).delete().eq("key", key);
-    } catch { /* silencioso */ }
+    try { await supabase.from(TABLE).delete().eq("key", key); } catch { /* silencioso */ }
   }
 
   // Verificar que la tabla existe haciendo una lectura de prueba
@@ -171,17 +159,33 @@ async function useSupabaseAuthState () {
           }));
           return result;
         },
-        set: async (data) => {
-          const tasks = [];
+        set: (data) => {
+          // BATCH UPSERTS ASÍNCRONOS - Evita que el celular falle por timeout de red
+          const upserts = [];
+          const deletes = [];
+          
           for (const type of Object.keys(data)) {
             for (const id of Object.keys(data[type])) {
               const value = data[type][id];
-              tasks.push(value != null
-                ? writeData(`${type}||${id}`, value)
-                : removeData(`${type}||${id}`));
+              const dbKey = `${type}||${id}`;
+              if (value != null) {
+                upserts.push({ key: dbKey, value: serializeForDB(value) });
+              } else {
+                deletes.push(dbKey);
+              }
             }
           }
-          await Promise.all(tasks);
+          
+          if (upserts.length > 0) {
+            supabase.from(TABLE).upsert(upserts).then(({ error }) => {
+              if (error) console.warn("❌ [SupabaseAuth] Lote Upsert falló:", error.message);
+            });
+          }
+          if (deletes.length > 0) {
+            supabase.from(TABLE).delete().in("key", deletes).then(({ error }) => {
+              if (error) console.warn("❌ [SupabaseAuth] Lote Delete falló:", error.message);
+            });
+          }
         },
       },
     },
