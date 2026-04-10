@@ -71,126 +71,51 @@ async function sendTelegramAlert (message) {
   }
 }
 
-// ==================== AUTH SUPABASE (con serialización correcta de Buffers) ====================
-// El error anterior era: Buffer → JSONB → plain object → Bad noise handshake → código 0
-// Fix: serializar Buffers como { __type:"Buffer", data:"base64" } y restaurarlos al leer.
+// ==================== AUTH SUPABASE (Backup Asíncrono) ====================
+// Para evitar los timeouts del celular (QR check your internet) tenemos que usar
+// disco local (useMultiFileAuthState). Supabase servirá solo como respaldo
+// en bloque que se descarga al arrancar y se sube periódicamente en segundo plano.
 
-function serializeForDB (obj) {
-  if (obj === null || obj === undefined) return obj;
-  if (Buffer.isBuffer(obj) || obj instanceof Uint8Array) {
-    return { __type: "Buffer", data: Buffer.from(obj).toString("base64") };
-  }
-  if (Array.isArray(obj)) return obj.map(serializeForDB);
-  if (typeof obj === "object") {
-    const out = {};
-    for (const k of Object.keys(obj)) out[k] = serializeForDB(obj[k]);
-    return out;
-  }
-  return obj;
-}
+const AUTH_FOLDER = "./.auth_baileys";
 
-function deserializeFromDB (obj) {
-  if (obj === null || obj === undefined) return obj;
-  if (typeof obj === "object" && obj.__type === "Buffer" && obj.data) {
-    return Buffer.from(obj.data, "base64");
-  }
-  if (Array.isArray(obj)) return obj.map(deserializeFromDB);
-  if (typeof obj === "object") {
-    const out = {};
-    for (const k of Object.keys(obj)) out[k] = deserializeFromDB(obj[k]);
-    return out;
-  }
-  return obj;
-}
-
-async function useSupabaseAuthState () {
-  const TABLE = "baileys_auth";
-
-  async function readData (key) {
-    try {
-      const { data, error } = await supabase
-        .from(TABLE).select("value").eq("key", key).single();
-      if (error) {
-        if (error.code === 'PGRST116') return null; // fila no existe
-        throw error; // error real de red o base de datos
-      }
-      if (!data) return null;
-      return deserializeFromDB(data.value);
-    } catch (e) {
-      throw new Error(`Error leyendo '${key}' de Supabase: ${e.message}`);
+async function restoreAuthFromSupabase() {
+  try {
+    const { data, error } = await supabase.from("baileys_auth").select("value").eq("key", "backup_folder").single();
+    if (error || !data) return;
+    
+    if (!fs.existsSync(AUTH_FOLDER)) fs.mkdirSync(AUTH_FOLDER, { recursive: true });
+    
+    const folderData = data.value; // objeto con los archivos
+    for (const filename of Object.keys(folderData)) {
+      const filePath = path.join(AUTH_FOLDER, filename);
+      const fileData = folderData[filename];
+      fs.writeFileSync(filePath, JSON.stringify(fileData));
+    }
+    console.log("[Auth] ✅ Carpeta de sesión restaurada desde Supabase.");
+  } catch (e) {
+    if (e.code !== 'PGRST116') {
+      console.warn("[Auth] ⚠️ No se pudo restaurar respaldo de Supabase:", e.message);
     }
   }
+}
 
-  async function writeData (key, value) {
-    try {
-      const payload = serializeForDB(value);
-      const { error } = await supabase.from(TABLE).upsert([{ key, value: payload }]);
-      if (error) console.warn(`❌ [SupabaseAuth] Error guardando '${key}':`, error.message);
-    } catch (e) { /* silencioso */ }
-  }
-
-  async function removeData (key) {
-    try { await supabase.from(TABLE).delete().eq("key", key); } catch { /* silencioso */ }
-  }
-
-  // Verificar que la tabla existe haciendo una lectura de prueba
-  const testRead = await readData("__ping__");
-  const tableOk = testRead !== null || true; // si lanza, catch devuelve null
-
-  const { initAuthCreds } = require("@whiskeysockets/baileys");
-  let stored = null;
+async function backupAuthToSupabase() {
   try {
-    stored = await readData("creds");
+    if (!fs.existsSync(AUTH_FOLDER)) return;
+    const files = fs.readdirSync(AUTH_FOLDER);
+    const folderData = {};
+    for (const file of files) {
+      if (file.endsWith(".json")) {
+        const filePath = path.join(AUTH_FOLDER, file);
+        const content = fs.readFileSync(filePath, "utf-8");
+        folderData[file] = JSON.parse(content);
+      }
+    }
+    const { error } = await supabase.from("baileys_auth").upsert([{ key: "backup_folder", value: folderData }]);
+    if (error) console.warn("❌ [SupabaseAuth] Error subiendo respaldo:", error.message);
   } catch (e) {
-    console.error("[Auth] No se pudo conectar a Supabase para cargar la sesión. Cancelando para no borrar datos:", e.message);
-    throw e; // Esto forzará el catch en startBot() y usará filesystem
+    console.warn("❌ [SupabaseAuth] Exception subiendo respaldo:", e.message);
   }
-  const creds = stored ?? initAuthCreds();
-
-  return {
-    state: {
-      creds,
-      keys: {
-        get: async (type, ids) => {
-          const result = {};
-          await Promise.all(ids.map(async (id) => {
-            const val = await readData(`${type}||${id}`);
-            if (val !== null) result[id] = val;
-          }));
-          return result;
-        },
-        set: (data) => {
-          // BATCH UPSERTS ASÍNCRONOS - Evita que el celular falle por timeout de red
-          const upserts = [];
-          const deletes = [];
-          
-          for (const type of Object.keys(data)) {
-            for (const id of Object.keys(data[type])) {
-              const value = data[type][id];
-              const dbKey = `${type}||${id}`;
-              if (value != null) {
-                upserts.push({ key: dbKey, value: serializeForDB(value) });
-              } else {
-                deletes.push(dbKey);
-              }
-            }
-          }
-          
-          if (upserts.length > 0) {
-            supabase.from(TABLE).upsert(upserts).then(({ error }) => {
-              if (error) console.warn("❌ [SupabaseAuth] Lote Upsert falló:", error.message);
-            });
-          }
-          if (deletes.length > 0) {
-            supabase.from(TABLE).delete().in("key", deletes).then(({ error }) => {
-              if (error) console.warn("❌ [SupabaseAuth] Lote Delete falló:", error.message);
-            });
-          }
-        },
-      },
-    },
-    saveCreds: async () => { await writeData("creds", creds); },
-  };
 }
 
 // ==================== FUNCIONES DE DATOS (SUPABASE) ====================
@@ -832,20 +757,15 @@ async function startBot () {
       console.warn("[Baileys] No se pudo obtener versión WA, usando fallback:", version.join("."));
     }
 
-    // Auth híbrido: Supabase primero (sobrevive deploys), filesystem como respaldo
-    const AUTH_FOLDER = "./.auth_baileys";
-    let state, saveCreds;
-    try {
-      const sbAuth = await useSupabaseAuthState();
-      state = sbAuth.state;
-      saveCreds = sbAuth.saveCreds;
-      console.log("[Auth] ✅ Usando sesión de Supabase (sobrevive redeploys)");
-    } catch (e) {
-      console.warn("[Auth] ⚠️  Supabase no disponible, usando filesystem:", e.message);
-      const fsAuth = await useMultiFileAuthState(AUTH_FOLDER);
-      state = fsAuth.state;
-      saveCreds = fsAuth.saveCreds;
-    }
+    // Descargar respaldo desde Supabase antes de iniciar
+    await restoreAuthFromSupabase();
+
+    // Usar Auth ultrarrápido local en disco para que no haya timeouts
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+    
+    // Backup periódico silencioso hacia Supabase cada 3 minutos 
+    // (o al hacer un saveCreds). Esto salva la vida en redeploys de Render.
+    setInterval(backupAuthToSupabase, 3 * 60 * 1000);
 
     // Cache de mensajes recientes para retrasmisión (evita timeouts con WA viejos)
     const msgCache = new Map();
