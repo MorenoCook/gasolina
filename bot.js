@@ -5,7 +5,8 @@ const {
   fetchLatestBaileysVersion,
   initAuthCreds,
   BufferJSON,
-  proto
+  proto,
+  makeCacheableSignalKeyStore
 } = require("@whiskeysockets/baileys");
 const qrcode = require("qrcode-terminal");
 const express = require("express");
@@ -85,34 +86,37 @@ async function useSupabaseAuthState () {
   return {
     state: {
       creds,
-      keys: {
-        get: async (type, ids) => {
-          const result = {};
-          await Promise.all(
-            ids.map(async (id) => {
-              let val = await read(`${type}-${id}`);
-              if (val) {
-                if (type === "app-state-sync-key") {
-                  val = proto.Message.AppStateSyncKeyData.fromObject(val);
+      keys: makeCacheableSignalKeyStore(
+        {
+          get: async (type, ids) => {
+            const result = {};
+            await Promise.all(
+              ids.map(async (id) => {
+                let val = await read(`${type}-${id}`);
+                if (val) {
+                  if (type === "app-state-sync-key") {
+                    val = proto.Message.AppStateSyncKeyData.fromObject(val);
+                  }
+                  result[id] = val;
                 }
-                result[id] = val;
+              })
+            );
+            return result;
+          },
+          set: async (data) => {
+            const tasks = [];
+            for (const [type, entries] of Object.entries(data)) {
+              for (const [id, value] of Object.entries(entries)) {
+                tasks.push(
+                  value ? write(`${type}-${id}`, value) : del(`${type}-${id}`)
+                );
               }
-            })
-          );
-          return result;
-        },
-        set: async (data) => {
-          const tasks = [];
-          for (const [type, entries] of Object.entries(data)) {
-            for (const [id, value] of Object.entries(entries)) {
-              tasks.push(
-                value ? write(`${type}-${id}`, value) : del(`${type}-${id}`)
-              );
             }
+            await Promise.all(tasks);
           }
-          await Promise.all(tasks);
-        }
-      }
+        },
+        P({ level: "warn" })
+      )
     },
     saveCreds: () => write("creds", creds)
   };
@@ -833,6 +837,19 @@ async function startBot () {
             console.warn("[KeepAlive] Error al enviar presencia:", e.message);
           }
         }, 10 * 60 * 1000); // cada 10 minutos
+
+        if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
+          // Esperar 15s para que las sesiones E2E se sincronicen antes de enviar
+          // Usamos la función reply() porque tiene manejo automático de "No sessions"
+          setTimeout(async () => {
+            try {
+              await reply(GRUPO_PERMITIDO, "Sistema reiniciado");
+              console.log("Mensaje de reinicio enviado al grupo.");
+            } catch (e) {
+              console.error("No se pudo notificar al grupo:", e.message);
+            }
+          }, 15000);
+        }
       }
     });
 
