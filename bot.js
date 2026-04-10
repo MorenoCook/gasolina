@@ -64,24 +64,36 @@ async function sendTelegramAlert (message) {
 async function useSupabaseAuthState () {
   const write = async (key, data) => {
     const val = JSON.stringify(data, BufferJSON.replacer);
-    await supabase.from("baileys_auth").upsert([{ key, value: val }]);
+    const { error } = await supabase.from("baileys_auth").upsert([{ key, value: val }]);
+    if (error) console.error(`[Supabase Auth] Error escribiendo ${key}:`, error.message);
   };
 
   const read = async (key) => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("baileys_auth")
       .select("value")
       .eq("key", key)
       .single();
+    if (error && error.code !== "PGRST116") {
+      // PGRST116 is "Row not found", which is normal
+      console.error(`[Supabase Auth] Error leyendo ${key}:`, error.message);
+    }
     if (!data?.value) return null;
-    return JSON.parse(data.value, BufferJSON.reviver);
+    try {
+      return JSON.parse(data.value, BufferJSON.reviver);
+    } catch (e) {
+      console.error(`[Supabase Auth] Error parseando ${key}:`, e.message);
+      return null;
+    }
   };
 
   const del = async (key) => {
-    await supabase.from("baileys_auth").delete().eq("key", key);
+    const { error } = await supabase.from("baileys_auth").delete().eq("key", key);
+    if (error) console.error(`[Supabase Auth] Error borrando ${key}:`, error.message);
   };
 
-  const creds = (await read("creds")) || initAuthCreds();
+  let creds = await read("creds");
+  if (!creds) creds = initAuthCreds();
 
   return {
     state: {
@@ -104,15 +116,15 @@ async function useSupabaseAuthState () {
             return result;
           },
           set: async (data) => {
-            const tasks = [];
             for (const [type, entries] of Object.entries(data)) {
               for (const [id, value] of Object.entries(entries)) {
-                tasks.push(
-                  value ? write(`${type}-${id}`, value) : del(`${type}-${id}`)
-                );
+                if (value) {
+                  await write(`${type}-${id}`, value);
+                } else {
+                  await del(`${type}-${id}`);
+                }
               }
             }
-            await Promise.all(tasks);
           }
         },
         P({ level: "warn" })
