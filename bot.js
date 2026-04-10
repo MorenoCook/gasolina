@@ -3,8 +3,8 @@ const {
   makeWASocket,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  initAuthCreds,
   makeCacheableSignalKeyStore,
+  useMultiFileAuthState,
   Browsers,
 } = require("@whiskeysockets/baileys");
 const { Boom } = require("@hapi/boom");
@@ -69,85 +69,6 @@ async function sendTelegramAlert(message) {
   } catch (e) {
     console.warn("[Telegram] No se pudo enviar alerta:", e.message);
   }
-}
-
-// ==================== AUTH STATE EN SUPABASE ====================
-// IMPORTANTE: Crear en Supabase la tabla `baileys_auth`:
-//   key  TEXT PRIMARY KEY
-//   value JSONB
-// Así la sesión sobrevive redeploys (no necesita re-escanear QR cada vez).
-async function useSupabaseAuthState() {
-  const TABLE = "baileys_auth";
-
-  async function readData(key) {
-    try {
-      const { data } = await supabase
-        .from(TABLE)
-        .select("value")
-        .eq("key", key)
-        .single();
-      return data?.value ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  async function writeData(key, value) {
-    try {
-      const { error } = await supabase.from(TABLE).upsert([{ key, value }]);
-      if (error) console.warn(`[Supabase] Error al guardar '${key}':`, error.message);
-    } catch (e) {
-      console.warn(`[Supabase] writeData falló para '${key}':`, e.message);
-    }
-  }
-
-  async function removeData(key) {
-    try {
-      const { error } = await supabase.from(TABLE).delete().eq("key", key);
-      if (error) console.warn(`[Supabase] Error al borrar '${key}':`, error.message);
-    } catch (e) {
-      console.warn(`[Supabase] removeData falló para '${key}':`, e.message);
-    }
-  }
-
-  const stored = await readData("creds");
-  const creds = stored ?? initAuthCreds();
-
-  return {
-    state: {
-      creds,
-      keys: {
-        get: async (type, ids) => {
-          const data = {};
-          await Promise.all(
-            ids.map(async (id) => {
-              const val = await readData(`${type}-${id}`);
-              if (val !== null) data[id] = val;
-            })
-          );
-          return data;
-        },
-        set: async (data) => {
-          const tasks = [];
-          for (const category of Object.keys(data)) {
-            for (const id of Object.keys(data[category])) {
-              const value = data[category][id];
-              const key = `${category}-${id}`;
-              tasks.push(
-                value !== null && value !== undefined
-                  ? writeData(key, value)
-                  : removeData(key)
-              );
-            }
-          }
-          await Promise.all(tasks);
-        },
-      },
-    },
-    saveCreds: async () => {
-      await writeData("creds", creds);
-    },
-  };
 }
 
 // ==================== FUNCIONES DE DATOS (SUPABASE) ====================
@@ -751,7 +672,10 @@ async function startBot() {
       console.warn("[Baileys] No se pudo obtener versión WA, usando fallback:", version.join("."));
     }
 
-    const { state, saveCreds } = await useSupabaseAuthState();
+    // Auth en disco (Baileys maneja Buffers correctamente — no corrompe claves crypto)
+    const AUTH_FOLDER = "./.auth_baileys";
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+    console.log(`[Auth] Usando sesión en: ${AUTH_FOLDER}`);
 
     sock = makeWASocket({
       version,
