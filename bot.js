@@ -12,6 +12,8 @@ const qrcode = require("qrcode-terminal");
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
 const pino = require("pino");
+const fs = require("fs");
+const path = require("path");
 
 // Proxy opcional (para evadir bloqueo de IPs de Render por WhatsApp)
 // Configura en Render: HTTPS_PROXY_URL=http://user:pass@proxy-host:port
