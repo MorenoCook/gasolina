@@ -6,23 +6,35 @@ const { createClient } = require("@supabase/supabase-js");
 // ==================== CHROMIUM PATH DETECTOR ====================
 // whatsapp-web.js usa su propio puppeteer-core interno que NO auto-descarga
 // Chrome. Solución: pedirle al paquete `puppeteer` (que sí descarga Chrome
-// en el postinstall) la ruta exacta de su binario y pasársela al Client.
+// durante npm install) la ruta exacta y pasársela al Client.
+const fs = require("fs");
 function findChromiumExecutable () {
-  // 1. Variable de entorno manual (máxima prioridad, útil para overrides)
+  // 1. Variable de entorno manual — SOLO si el archivo realmente existe
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    console.log(`[Chrome] Usando PUPPETEER_EXECUTABLE_PATH: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
-    return process.env.PUPPETEER_EXECUTABLE_PATH;
+    const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    if (fs.existsSync(envPath)) {
+      console.log(`[Chrome] ✅ PUPPETEER_EXECUTABLE_PATH existe: ${envPath}`);
+      return envPath;
+    } else {
+      console.warn(`[Chrome] ⚠️  PUPPETEER_EXECUTABLE_PATH apunta a un archivo que NO existe: ${envPath}`);
+      console.warn("[Chrome] Ignorando esa variable y buscando Chrome de puppeteer...");
+    }
   }
-  // 2. Ruta reportada por el paquete `puppeteer` del proyecto (instalado via postinstall)
+  // 2. Ruta reportada por el paquete `puppeteer` (descarga Chrome en npm install)
   try {
     const puppeteer = require("puppeteer");
-    const path = puppeteer.executablePath();
-    console.log(`[Chrome] Usando Chrome de puppeteer: ${path}`);
-    return path;
+    const execPath = puppeteer.executablePath();
+    if (fs.existsSync(execPath)) {
+      console.log(`[Chrome] ✅ Chrome encontrado via puppeteer.executablePath(): ${execPath}`);
+      return execPath;
+    } else {
+      console.warn(`[Chrome] ⚠️  puppeteer.executablePath() devolvió: ${execPath}`);
+      console.warn("[Chrome] Pero ese archivo NO existe. ¿El postinstall falló?");
+    }
   } catch (e) {
     console.warn("[Chrome] No se pudo obtener la ruta de puppeteer:", e.message);
   }
-  console.warn("[Chrome] Sin ruta de Chrome. Puede fallar el inicio.");
+  console.error("[Chrome] ❌ No se encontró Chrome. El bot fallará al iniciar.");
   return undefined;
 }
 
@@ -654,22 +666,23 @@ async function startBot () {
 
     client = new Client({
       authStrategy: new LocalAuth(),
-      authTimeoutMs: 120000, // Darle 2 minutos de tolerancia al CPU lento
-      qrMaxRetries: 5, // Reintentar el QR si falla la carga
+      authTimeoutMs: 180000, // 3 minutos — CPU lento en Render free tier
+      qrMaxRetries: 15,      // Más intentos para completar el escaneo
       puppeteer: {
         headless: true,
-        executablePath: CHROMIUM_EXECUTABLE, // Binario del sistema (Render/Linux)
-        timeout: 120000, // Darle 2 minutos a Chrome para abrir
+        executablePath: CHROMIUM_EXECUTABLE,
+        timeout: 180000, // 3 minutos para que Chrome abra
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
+          "--disable-dev-shm-usage",       // Evitar crash por /dev/shm pequeño
           "--disable-accelerated-2d-canvas",
           "--no-first-run",
           "--no-zygote",
-          "--single-process",
+          // "--single-process" REMOVIDO — causa inestabilidad durante auth WebSocket
           "--disable-gpu",
-          "--js-flags=--max-old-space-size=256",
+          "--disable-software-rasterizer",
+          "--js-flags=--max-old-space-size=300",
           "--disable-web-security",
           "--disable-features=IsolateOrigins,site-per-process",
           "--disable-site-isolation-trials",
@@ -680,7 +693,9 @@ async function startBot () {
           "--disable-extensions",
           "--disable-features=TranslateUI,BlinkGenPropertyTrees",
           "--disable-ipc-flooding-protection",
-          "--mute-audio"
+          "--mute-audio",
+          "--memory-pressure-off",
+          "--disable-hang-monitor"
         ]
       }
     });
