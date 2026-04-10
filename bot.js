@@ -85,7 +85,11 @@ async function restoreAuthFromSupabase() {
     const { data, error } = await supabase.from("baileys_auth").select("value").eq("key", "backup_folder").single();
     if (error || !data) return;
     
-    if (!fs.existsSync(AUTH_FOLDER)) fs.mkdirSync(AUTH_FOLDER, { recursive: true });
+    // Limpiar carpeta entera para evitar mezclar sesiones viejas con nuevas
+    if (fs.existsSync(AUTH_FOLDER)) {
+      fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+    }
+    fs.mkdirSync(AUTH_FOLDER, { recursive: true });
     
     const folderData = data.value; // objeto con los archivos
     for (const filename of Object.keys(folderData)) {
@@ -114,7 +118,11 @@ async function backupAuthToSupabase() {
       }
     }
     const { error } = await supabase.from("baileys_auth").upsert([{ key: "backup_folder", value: folderData }]);
-    if (error) console.warn("❌ [SupabaseAuth] Error subiendo respaldo:", error.message);
+    if (error) {
+      console.warn("❌ [SupabaseAuth] Error subiendo respaldo:", error.message);
+    } else {
+      console.log(`[SupabaseAuth] ✅ Respaldo subido ok (${Object.keys(folderData).length} archivos).`);
+    }
   } catch (e) {
     console.warn("❌ [SupabaseAuth] Exception subiendo respaldo:", e.message);
   }
@@ -765,16 +773,21 @@ async function startBot () {
     // Usar Auth ultrarrápido local en disco para que no haya timeouts
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     
-    // Backup periódico constante (por si acaso)
-    setInterval(backupAuthToSupabase, 5 * 60 * 1000);
+    // Cerrar socket viejo en caso de reconexión para no duplicar listeners
+    if (sock) {
+      try { sock.end(); } catch (e) {}
+    }
 
-    // Sistema de guardado a Supabase optimizado (debounce)
+    // Backup periódico constante y más rápido para no perder llaves de sesión
+    setInterval(backupAuthToSupabase, 60 * 1000); // 1 minuto
+
+    // Sistema de guardado a Supabase optimizado (debounce de 5 seg)
     let backupTimeout = null;
     const debouncedBackup = () => {
       if (backupTimeout) clearTimeout(backupTimeout);
-      backupTimeout = setTimeout(() => {
-        backupAuthToSupabase();
-      }, 10000); // 10 segundos después del último cambio
+      backupTimeout = setTimeout(async () => {
+        await backupAuthToSupabase();
+      }, 5000); 
     };
 
     // Cache de mensajes recientes para retrasmisión (evita timeouts con WA viejos)
@@ -925,12 +938,13 @@ setTimeout(() => startBot(), 5000);
 
 // ==================== APAGADO LIMPIO (SIGTERM) ====================
 async function shutdown (signal) {
-  console.log(`\n[${signal}] Apagando instancia limpiamente...`);
+  console.log(`\n[${signal}] Apagando instancia y respaldando sesión...`);
   global.shuttingDown = true;
   try {
+    await backupAuthToSupabase();
     if (sock) sock.end();
   } catch (_) { }
-  setTimeout(() => process.exit(0), 1500);
+  setTimeout(() => process.exit(0), 1000);
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
