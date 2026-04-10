@@ -53,7 +53,7 @@ app.listen(process.env.PORT || 3000, () =>
 );
 
 // ==================== ALERTAS TELEGRAM ====================
-async function sendTelegramAlert(message) {
+async function sendTelegramAlert (message) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -62,7 +62,7 @@ async function sendTelegramAlert(message) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: TELEGRAM_CHAT_ID,
-        text: `🤖 *GasolinaBot*\n\n${message}`,
+        text: `🤖 *GasolinaBot*\n${message}`,
         parse_mode: "Markdown",
       }),
     });
@@ -71,8 +71,106 @@ async function sendTelegramAlert(message) {
   }
 }
 
+// ==================== AUTH SUPABASE (con serialización correcta de Buffers) ====================
+// El error anterior era: Buffer → JSONB → plain object → Bad noise handshake → código 0
+// Fix: serializar Buffers como { __type:"Buffer", data:"base64" } y restaurarlos al leer.
+
+function serializeForDB (obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (Buffer.isBuffer(obj) || obj instanceof Uint8Array) {
+    return { __type: "Buffer", data: Buffer.from(obj).toString("base64") };
+  }
+  if (Array.isArray(obj)) return obj.map(serializeForDB);
+  if (typeof obj === "object") {
+    const out = {};
+    for (const k of Object.keys(obj)) out[k] = serializeForDB(obj[k]);
+    return out;
+  }
+  return obj;
+}
+
+function deserializeFromDB (obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === "object" && obj.__type === "Buffer" && obj.data) {
+    return Buffer.from(obj.data, "base64");
+  }
+  if (Array.isArray(obj)) return obj.map(deserializeFromDB);
+  if (typeof obj === "object") {
+    const out = {};
+    for (const k of Object.keys(obj)) out[k] = deserializeFromDB(obj[k]);
+    return out;
+  }
+  return obj;
+}
+
+async function useSupabaseAuthState () {
+  const TABLE = "baileys_auth";
+
+  async function readData (key) {
+    try {
+      const { data, error } = await supabase
+        .from(TABLE).select("value").eq("key", key).single();
+      if (error || !data) return null;
+      return deserializeFromDB(data.value);
+    } catch { return null; }
+  }
+
+  async function writeData (key, value) {
+    try {
+      const { error } = await supabase
+        .from(TABLE).upsert([{ key, value: serializeForDB(value) }]);
+      if (error) console.warn(`[SupabaseAuth] Error guardando '${key}':`, error.message);
+    } catch (e) {
+      console.warn(`[SupabaseAuth] writeData falló '${key}':`, e.message);
+    }
+  }
+
+  async function removeData (key) {
+    try {
+      await supabase.from(TABLE).delete().eq("key", key);
+    } catch { /* silencioso */ }
+  }
+
+  // Verificar que la tabla existe haciendo una lectura de prueba
+  const testRead = await readData("__ping__");
+  const tableOk = testRead !== null || true; // si lanza, catch devuelve null
+
+  const { initAuthCreds } = require("@whiskeysockets/baileys");
+  const stored = await readData("creds");
+  const creds = stored ?? initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const result = {};
+          await Promise.all(ids.map(async (id) => {
+            const val = await readData(`${type}||${id}`);
+            if (val !== null) result[id] = val;
+          }));
+          return result;
+        },
+        set: async (data) => {
+          const tasks = [];
+          for (const type of Object.keys(data)) {
+            for (const id of Object.keys(data[type])) {
+              const value = data[type][id];
+              tasks.push(value != null
+                ? writeData(`${type}||${id}`, value)
+                : removeData(`${type}||${id}`));
+            }
+          }
+          await Promise.all(tasks);
+        },
+      },
+    },
+    saveCreds: async () => { await writeData("creds", creds); },
+  };
+}
+
 // ==================== FUNCIONES DE DATOS (SUPABASE) ====================
-async function appendCSV(row) {
+async function appendCSV (row) {
   const fecha = new Date().toLocaleString("es-MX", {
     timeZone: "America/Mexico_City",
   });
@@ -91,7 +189,7 @@ async function appendCSV(row) {
   ]);
 }
 
-async function loadCars() {
+async function loadCars () {
   const { data, error } = await supabase
     .from("cars")
     .select("state_json")
@@ -121,27 +219,27 @@ async function loadCars() {
   return cars;
 }
 
-async function saveCars(cars) {
+async function saveCars (cars) {
   await supabase.from("cars").upsert([{ id: 1, state_json: cars }]);
 }
 
 // ==================== SESIONES EN MEMORIA ====================
 const sessions = {};
-function getSession(chatId) {
+function getSession (chatId) {
   if (!sessions[chatId]) sessions[chatId] = { step: "idle" };
   return sessions[chatId];
 }
-function resetSession(chatId) {
+function resetSession (chatId) {
   sessions[chatId] = { step: "idle" };
 }
 
 // ==================== UTILIDADES ====================
-function parseNumber(text) {
+function parseNumber (text) {
   const n = parseFloat(text.replace(",", ".").trim());
   return isNaN(n) ? null : n;
 }
 
-function parseRegistroExpress(textoOriginal) {
+function parseRegistroExpress (textoOriginal) {
   const lower = textoOriginal.toLowerCase();
 
   let carKey = null;
@@ -166,13 +264,31 @@ function parseRegistroExpress(textoOriginal) {
   if (costMatch) {
     cost = parseFloat(costMatch[1].replace(",", "."));
   } else {
-    const numbers = cleanLower.match(/\b\d+[\.,]?\d*\b/g);
-    if (numbers && lts && km) {
-      for (const str of numbers) {
-        const num = parseFloat(str.replace(",", "."));
-        if (num > 50 && num < 6000 && Math.abs(num - lts) > 0.01 && Math.abs(num - km) > 0.01) {
+    // Busca todas las líneas
+    const lines = textoOriginal.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      // Si la linea es solo un numero soltito (ej: "797")
+      if (/^\d+[\.,]?\d*$/.test(trimmed)) {
+        const num = parseFloat(trimmed.replace(",", "."));
+        // si el num parece un costo y no es igual a los km ni a los litros
+        if (num > 50 && num <= 3000 && Math.abs(num - (lts || 0)) > 0.01 && Math.abs(num - km) > 0.01) {
           cost = num;
           break;
+        }
+      }
+    }
+
+    // Si no funcionó buscando por líneas, buscar cualquier número en el string (fallback original)
+    if (!cost) {
+      const numbers = cleanLower.match(/\b\d+[\.,]?\d*\b/g);
+      if (numbers && lts && km) {
+        for (const str of numbers) {
+          const num = parseFloat(str.replace(",", "."));
+          if (num > 50 && num <= 3000 && Math.abs(num - lts) > 0.01 && Math.abs(num - km) > 0.01) {
+            cost = num;
+            break;
+          }
         }
       }
     }
@@ -181,18 +297,18 @@ function parseRegistroExpress(textoOriginal) {
   return { carKey, km, litros: lts, cost };
 }
 
-function carMenu(cars) {
+function carMenu (cars) {
   return (
-    `*Bot de Gasolina*\n\n` +
-    `¿Cuál auto vas a cargar?\n\n` +
+    `*Bot de Gasolina*\n` +
+    `¿Cuál auto vas a cargar?\n` +
     `1️⃣  ${cars.car1.name}\n` +
     `2️⃣  ${cars.car2.name}\n` +
-    `3️⃣  ${cars.car3.name}\n\n` +
+    `3️⃣  ${cars.car3.name}\n` +
     `Responde con *1*, *2* o *3*`
   );
 }
 
-function buildAlertas(car, km) {
+function buildAlertas (car, km) {
   let alertas = "";
   if (car.lastOilKm !== null) {
     const oilDiff = km - car.lastOilKm;
@@ -221,7 +337,7 @@ let sock;
 let retryCount = 0;
 
 // Extrae el texto del mensaje — compatible con versiones viejas de WhatsApp
-function getMessageText(message) {
+function getMessageText (message) {
   return (
     message.message?.conversation ||
     message.message?.extendedTextMessage?.text ||
@@ -234,7 +350,7 @@ function getMessageText(message) {
   );
 }
 
-async function reply(chatId, text, rawMessage) {
+async function reply (chatId, text, rawMessage) {
   try {
     if (rawMessage) {
       await sock.sendMessage(chatId, { text }, { quoted: rawMessage });
@@ -246,7 +362,7 @@ async function reply(chatId, text, rawMessage) {
   }
 }
 
-async function handleMessage(rawMessage) {
+async function handleMessage (rawMessage) {
   const chatId = rawMessage.key.remoteJid;
   if (!chatId || chatId === "status@broadcast" || chatId.includes("@newsletter")) return;
 
@@ -256,7 +372,7 @@ async function handleMessage(rawMessage) {
     return;
   }
 
-  const body = getMessageText(rawMessage).trim();
+  let body = getMessageText(rawMessage).trim();
   if (!body) return;
 
   // Ignorar las respuestas automáticas del propio bot
@@ -290,7 +406,7 @@ async function handleMessage(rawMessage) {
   if (global.isPaused) return;
   if (body.toLowerCase() === "/apagar" && chatId === GRUPO_PERMITIDO) {
     global.isPaused = true;
-    await reply(chatId, "*SISTEMA APAGADO*\n\nEscribe `/encender` cuando quieras reactivarlo.", rawMessage);
+    await reply(chatId, "*SISTEMA APAGADO*\nEscribe `/encender` cuando quieras reactivarlo.", rawMessage);
     return;
   }
 
@@ -317,18 +433,18 @@ async function handleMessage(rawMessage) {
 
       if (!expressData.litros) {
         sessions[chatId].step = "input_liters";
-        await reply(chatId, `*Registro Express Detectado*\n Auto: ${car.name}\nKM: ${expressData.km.toLocaleString("es-MX")}${alertas}\n\n¿Cuántos *litros* cargaste?`, rawMessage);
+        await reply(chatId, `*Registro Express Detectado*\n Auto: ${car.name}\nKM: ${expressData.km.toLocaleString("es-MX")}${alertas}\n¿Cuántos *litros* cargaste?`, rawMessage);
         return;
       }
       sessions[chatId].liters = expressData.litros;
       if (!expressData.cost) {
         sessions[chatId].step = "input_cost";
-        await reply(chatId, `*Registro Express: ${car.name}*\nKM: ${expressData.km.toLocaleString("es-MX")} | Lts: ${expressData.litros}${alertas}\n\n¿Cuánto *pagaste* en total? (ej. 900)`, rawMessage);
+        await reply(chatId, `*Registro Express: ${car.name}*\nKM: ${expressData.km.toLocaleString("es-MX")} | Lts: ${expressData.litros}${alertas}\n¿Cuánto *pagaste* en total? (ej. 900)`, rawMessage);
         return;
       }
       sessions[chatId].cost = expressData.cost;
       sessions[chatId].step = "confirm_full";
-      await reply(chatId, `*Registro Multi-Dato Exitoso* ⚡\n\nAuto: ${car.name}\nKM: ${expressData.km.toLocaleString("es-MX")}\nLitros: ${expressData.litros} L\nCosto: $${expressData.cost}\n${alertas}\n\n¿Llenaste el tanque *completo*?\nResponde *si* o *no*`, rawMessage);
+      await reply(chatId, `*Registro Multi-Dato Exitoso* ⚡\nAuto: ${car.name}\nKM: ${expressData.km.toLocaleString("es-MX")}\nLitros: ${expressData.litros} L\nCosto: $${expressData.cost}\n${alertas}\n¿Llenaste el tanque *completo*?\nResponde *si* o *no*`, rawMessage);
       return;
     }
   }
@@ -341,15 +457,20 @@ async function handleMessage(rawMessage) {
       const carKey = "car" + args[1];
       sessions[chatId].carKey = carKey;
       sessions[chatId].step = "input_km";
-      const car = cars[carKey];
-      const pendingInfo = car.accLiters > 0 ? `\n_(Acumulado sin rendimiento: *${car.accLiters.toFixed(2)} L*)_` : "";
-      const lastInfo = car.lastKm !== null ? `\n_(Último odómetro: *${car.lastKm.toLocaleString("es-MX")} km*)_` : `\n_(Sin registro previo)_`;
-      await reply(chatId, `${car.name} seleccionado ✓${lastInfo}${pendingInfo}\n\n¿Cuál es el *kilometraje actual*?\n(ej. 45320)`, rawMessage);
+      if (args.length > 2) {
+        body = args.slice(2).join(" ");
+      } else {
+        const car = cars[carKey];
+        const pendingInfo = car.accLiters > 0 ? `\n_(Acumulado sin rendimiento: *${car.accLiters.toFixed(2)} L*)_` : "";
+        const lastInfo = car.lastKm !== null ? `\n_(Último odómetro: *${car.lastKm.toLocaleString("es-MX")} km*)_` : `\n_(Sin registro previo)_`;
+        await reply(chatId, `${car.name} seleccionado ✓${lastInfo}${pendingInfo}\n¿Cuál es el *kilometraje actual*?\n(ej. 45320)`, rawMessage);
+        return;
+      }
+    } else {
+      sessions[chatId].step = "select_car";
+      await reply(chatId, carMenu(cars), rawMessage);
       return;
     }
-    sessions[chatId].step = "select_car";
-    await reply(chatId, carMenu(cars), rawMessage);
-    return;
   }
 
   if (body.toLowerCase().startsWith("/aceite")) {
@@ -359,12 +480,17 @@ async function handleMessage(rawMessage) {
       const carKey = "car" + args[1];
       sessions[chatId].carKey = carKey;
       sessions[chatId].step = "input_oil_km";
-      await reply(chatId, `Seleccionaste ${cars[carKey].name}\n\nEscribe el *kilometraje* actual en el que se acaba de hacer el cambio de aceite:\n(ej. 52000)`, rawMessage);
+      if (args.length > 2) {
+        body = args.slice(2).join(" ");
+      } else {
+        await reply(chatId, `Seleccionaste ${cars[carKey].name}\nEscribe el *kilometraje* actual en el que se acaba de hacer el cambio de aceite:\n(ej. 52000)`, rawMessage);
+        return;
+      }
+    } else {
+      sessions[chatId].step = "select_car_oil";
+      await reply(chatId, `*Cambio de Aceite*\n¿A cuál auto le cambiaste el aceite?\n1️⃣  ${cars.car1.name}\n2️⃣  ${cars.car2.name}\n3️⃣  ${cars.car3.name}\nResponde con *1*, *2* o *3*`, rawMessage);
       return;
     }
-    sessions[chatId].step = "select_car_oil";
-    await reply(chatId, `*Cambio de Aceite*\n\n¿A cuál auto le cambiaste el aceite?\n\n1️⃣  ${cars.car1.name}\n2️⃣  ${cars.car2.name}\n3️⃣  ${cars.car3.name}\n\nResponde con *1*, *2* o *3*`, rawMessage);
-    return;
   }
 
   if (body.toLowerCase().startsWith("/llantas")) {
@@ -374,12 +500,17 @@ async function handleMessage(rawMessage) {
       const carKey = "car" + args[1];
       sessions[chatId].carKey = carKey;
       sessions[chatId].step = "input_tire_km";
-      await reply(chatId, `Seleccionaste ${cars[carKey].name}\n\nEscribe el *kilometraje* de la instalación de tus llantas nuevas:\n(ej. 45000)`, rawMessage);
+      if (args.length > 2) {
+        body = args.slice(2).join(" ");
+      } else {
+        await reply(chatId, `Seleccionaste ${cars[carKey].name}\nEscribe el *kilometraje* de la instalación de tus llantas nuevas:\n(ej. 45000)`, rawMessage);
+        return;
+      }
+    } else {
+      sessions[chatId].step = "select_car_tire";
+      await reply(chatId, `*Cambio de Llantas*\n¿A cuál auto se le pusieron llantas nuevas?\n1️⃣  ${cars.car1.name}\n2️⃣  ${cars.car2.name}\n3️⃣  ${cars.car3.name}\nResponde con *1*, *2* o *3*`, rawMessage);
       return;
     }
-    sessions[chatId].step = "select_car_tire";
-    await reply(chatId, `*Cambio de Llantas*\n\n¿A cuál auto se le pusieron llantas nuevas?\n\n1️⃣  ${cars.car1.name}\n2️⃣  ${cars.car2.name}\n3️⃣  ${cars.car3.name}\n\nResponde con *1*, *2* o *3*`, rawMessage);
-    return;
   }
 
   if (body.toLowerCase().startsWith("/poliza")) {
@@ -389,12 +520,17 @@ async function handleMessage(rawMessage) {
       const carKey = "car" + args[1];
       sessions[chatId].carKey = carKey;
       sessions[chatId].step = "input_poliza";
-      await reply(chatId, `Seleccionaste ${cars[carKey].name}\n\nEscribe los datos de la póliza:\n(Ejemplo: GNP Poliza 12345 - Vence 15 Octubre)`, rawMessage);
+      if (args.length > 2) {
+        body = args.slice(2).join(" ");
+      } else {
+        await reply(chatId, `Seleccionaste ${cars[carKey].name}\nEscribe los datos de la póliza:\n(Ejemplo: GNP Poliza 12345 - Vence 15 Octubre)`, rawMessage);
+        return;
+      }
+    } else {
+      sessions[chatId].step = "select_car_poliza";
+      await reply(chatId, `*Registrar Póliza de Seguro*\n¿A qué auto le vas a registrar el seguro?\n1️⃣  ${cars.car1.name}\n2️⃣  ${cars.car2.name}\n3️⃣  ${cars.car3.name}\nResponde con 1, 2 o 3`, rawMessage);
       return;
     }
-    sessions[chatId].step = "select_car_poliza";
-    await reply(chatId, `*Registrar Póliza de Seguro*\n\n¿A qué auto le vas a registrar el seguro?\n\n1️⃣  ${cars.car1.name}\n2️⃣  ${cars.car2.name}\n3️⃣  ${cars.car3.name}\n\nResponde con 1, 2 o 3`, rawMessage);
-    return;
   }
 
   if (body.toLowerCase() === "/seguros") {
@@ -461,7 +597,7 @@ async function handleMessage(rawMessage) {
       const lastInfo = car.lastKm !== null
         ? `\n_(Último odómetro: *${car.lastKm.toLocaleString("es-MX")} km*)_`
         : `\n_(Sin registro previo — este será el punto de partida)_`;
-      await reply(chatId, `${car.name} seleccionado ✓${lastInfo}${pendingInfo}\n\n¿Cuál es el *kilometraje actual*?\n(ej. 45320)`, rawMessage);
+      await reply(chatId, `${car.name} seleccionado ✓${lastInfo}${pendingInfo}\n¿Cuál es el *kilometraje actual*?\n(ej. 45320)`, rawMessage);
       break;
     }
 
@@ -474,7 +610,7 @@ async function handleMessage(rawMessage) {
         car.lastKm = km;
         await saveCars(cars);
         resetSession(chatId);
-        await reply(chatId, `*Kilometraje inicial: ${km.toLocaleString("es-MX")} km*\n\nLa próxima carga, llena el tanque completo para establecer la base`, rawMessage);
+        await reply(chatId, `*Kilometraje inicial: ${km.toLocaleString("es-MX")} km*\nLa próxima carga, llena el tanque completo para establecer la base`, rawMessage);
         return;
       }
       if (km <= car.lastKm) {
@@ -502,7 +638,7 @@ async function handleMessage(rawMessage) {
       if (cost === null || cost <= 0) { await reply(chatId, "❌ Monto inválido. (ej. 950)", rawMessage); return; }
       session.cost = cost;
       session.step = "confirm_full";
-      await reply(chatId, `¿Llenaste el tanque *completo*?\n\nResponde *si* o *no*`, rawMessage);
+      await reply(chatId, `¿Llenaste el tanque *completo*?\nResponde *si* o *no*`, rawMessage);
       break;
     }
 
@@ -525,12 +661,12 @@ async function handleMessage(rawMessage) {
         await appendCSV({ autoName: car.name, kmActual: currentKm, kmRecorridos: null, litros: liters, costo: cost, lleno: false, rendimiento: null, costoPorKm: null });
         resetSession(chatId);
         await reply(chatId,
-          `*Carga parcial registrada*\n\n` +
+          `*Carga parcial registrada*\n` +
           `Litros esta carga:  ${liters.toFixed(2)} L\n` +
           `Costo esta carga:   $${cost.toFixed(2)}\n` +
-          `Precio/litro:       $${precioL.toFixed(2)}/L\n\n` +
+          `Precio/litro:       $${precioL.toFixed(2)}/L\n` +
           `*Acumulado desde último lleno:*\n` +
-          `   ${car.accLiters.toFixed(2)} L — $${car.accCost.toFixed(2)}\n\n` +
+          `   ${car.accLiters.toFixed(2)} L — $${car.accCost.toFixed(2)}\n` +
           `⏳ El rendimiento se calculará al llenar el tanque completo.`, rawMessage);
         return;
       }
@@ -545,7 +681,7 @@ async function handleMessage(rawMessage) {
         await saveCars(cars);
         await appendCSV({ autoName: car.name, kmActual: currentKm, kmRecorridos: null, litros: liters, costo: cost, lleno: true, rendimiento: null, costoPorKm: null });
         resetSession(chatId);
-        await reply(chatId, `*Primera base establecida: ${currentKm.toLocaleString("es-MX")} km*\n\n Precio/litro: $${precioL.toFixed(2)}/L\n\nYa podemos calcular rendimiento en la próxima carga completa`, rawMessage);
+        await reply(chatId, `*Primera base establecida: ${currentKm.toLocaleString("es-MX")} km*\n Precio/litro: $${precioL.toFixed(2)}/L\nYa podemos calcular rendimiento en la próxima carga completa`, rawMessage);
         return;
       }
 
@@ -571,13 +707,13 @@ async function handleMessage(rawMessage) {
         `━━━━━━━━━━━━━━━━━━━━━\n` +
         `*Rendimiento*\n` +
         `${car.name}\n` +
-        `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━\n` +
         `Km recorridos:    *${kmRecorridos.toLocaleString("es-MX", { maximumFractionDigits: 1 })} km*\n` +
         `Litros:   *${totalLiters.toFixed(2)} L*\n` +
-        `Costo total:      *$${totalCost.toFixed(2)}*\n\n` +
-        `${bar} *Rendimiento:  ${rendimiento.toFixed(2)} km/L*\n\n` +
+        `Costo total:      *$${totalCost.toFixed(2)}*\n` +
+        `${bar} *Rendimiento:  ${rendimiento.toFixed(2)} km/L*\n` +
         `Precio prom/litro: $${totalPrecioL.toFixed(2)}/L\n` +
-        `Costo por km:      $${costoPorKm.toFixed(2)}/km\n\n` +
+        `Costo por km:      $${costoPorKm.toFixed(2)}/km\n` +
         `Nueva base:        ${currentKm.toLocaleString("es-MX")} km\n` +
         `━━━━━━━━━━━━━━━━━━━━━\n` +
         `*Estado del Vehículo*\n` +
@@ -594,7 +730,7 @@ async function handleMessage(rawMessage) {
       if (!carKey) { await reply(chatId, "❌ Responde con *1*, *2* o *3*.", rawMessage); return; }
       session.carKey = carKey;
       session.step = "input_oil_km";
-      await reply(chatId, `Seleccionaste ${cars[carKey].name}\n\nEscribe el *kilometraje* actual en el que se acaba de hacer el cambio de aceite:\n(ej. 52000)`, rawMessage);
+      await reply(chatId, `Seleccionaste ${cars[carKey].name}\nEscribe el *kilometraje* actual en el que se acaba de hacer el cambio de aceite:\n(ej. 52000)`, rawMessage);
       break;
     }
 
@@ -606,7 +742,7 @@ async function handleMessage(rawMessage) {
       await saveCars(cars);
       resetSession(chatId);
       const nextOil = km + 10000;
-      await reply(chatId, `*¡Aceite renovado a los ${km.toLocaleString("es-MX")} km!*\n\nEl sistema te avisará automáticamente cuando pases de los ${nextOil.toLocaleString("es-MX")} km.`, rawMessage);
+      await reply(chatId, `*¡Aceite renovado a los ${km.toLocaleString("es-MX")} km!*\nEl sistema te avisará automáticamente cuando pases de los ${nextOil.toLocaleString("es-MX")} km.`, rawMessage);
       break;
     }
 
@@ -616,7 +752,7 @@ async function handleMessage(rawMessage) {
       if (!carKey) { await reply(chatId, "❌ Responde con *1*, *2* o *3*.", rawMessage); return; }
       session.carKey = carKey;
       session.step = "input_tire_km";
-      await reply(chatId, `Seleccionaste ${cars[carKey].name}\n\nEscribe el *kilometraje* del vehículo en el que instalaste las llantas nuevas:\n(ej. 52000)`, rawMessage);
+      await reply(chatId, `Seleccionaste ${cars[carKey].name}\nEscribe el *kilometraje* del vehículo en el que instalaste las llantas nuevas:\n(ej. 52000)`, rawMessage);
       break;
     }
 
@@ -628,7 +764,7 @@ async function handleMessage(rawMessage) {
       await saveCars(cars);
       resetSession(chatId);
       const nextTires = km + 50000;
-      await reply(chatId, `*¡Llantas registradas a los ${km.toLocaleString("es-MX")} km!*\n\nDispararé una alerta cuando logren alcanzar su límite físico de ${nextTires.toLocaleString("es-MX")} km.`, rawMessage);
+      await reply(chatId, `*¡Llantas registradas a los ${km.toLocaleString("es-MX")} km!*\nDispararé una alerta cuando logren alcanzar su límite físico de ${nextTires.toLocaleString("es-MX")} km.`, rawMessage);
       break;
     }
 
@@ -638,7 +774,7 @@ async function handleMessage(rawMessage) {
       if (!carKey) { await reply(chatId, "❌ Responde con 1, 2 o 3.", rawMessage); return; }
       session.carKey = carKey;
       session.step = "input_poliza";
-      await reply(chatId, `Seleccionaste ${cars[carKey].name}\n\nEscribe los datos de la póliza:\n(Ejemplo: GNP Poliza 12345 - Vence 15 Octubre)`, rawMessage);
+      await reply(chatId, `Seleccionaste ${cars[carKey].name}\nEscribe los datos de la póliza:\n(Ejemplo: GNP Poliza 12345 - Vence 15 Octubre)`, rawMessage);
       break;
     }
 
@@ -647,7 +783,7 @@ async function handleMessage(rawMessage) {
       car.poliza = body.trim();
       await saveCars(cars);
       resetSession(chatId);
-      await reply(chatId, `Póliza guardada para ${car.name}:\n"${car.poliza}"\n\nPuedes consultarla enviando /seguros`, rawMessage);
+      await reply(chatId, `Póliza guardada para ${car.name}:\n"${car.poliza}"\nPuedes consultarla enviando /seguros`, rawMessage);
       break;
     }
 
@@ -657,7 +793,7 @@ async function handleMessage(rawMessage) {
 }
 
 // ==================== ARRANQUE DEL BOT (BAILEYS) ====================
-async function startBot() {
+async function startBot () {
   try {
     console.log("Iniciando bot con Baileys (sin Chrome, RAM ultra ligera)...");
 
@@ -672,10 +808,20 @@ async function startBot() {
       console.warn("[Baileys] No se pudo obtener versión WA, usando fallback:", version.join("."));
     }
 
-    // Auth en disco (Baileys maneja Buffers correctamente — no corrompe claves crypto)
+    // Auth híbrido: Supabase primero (sobrevive deploys), filesystem como respaldo
     const AUTH_FOLDER = "./.auth_baileys";
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
-    console.log(`[Auth] Usando sesión en: ${AUTH_FOLDER}`);
+    let state, saveCreds;
+    try {
+      const sbAuth = await useSupabaseAuthState();
+      state = sbAuth.state;
+      saveCreds = sbAuth.saveCreds;
+      console.log("[Auth] ✅ Usando sesión de Supabase (sobrevive redeploys)");
+    } catch (e) {
+      console.warn("[Auth] ⚠️  Supabase no disponible, usando filesystem:", e.message);
+      const fsAuth = await useMultiFileAuthState(AUTH_FOLDER);
+      state = fsAuth.state;
+      saveCreds = fsAuth.saveCreds;
+    }
 
     // Cache de mensajes recientes para retrasmisión (evita timeouts con WA viejos)
     const msgCache = new Map();
@@ -748,7 +894,7 @@ async function startBot() {
         if (!global.lastQrAlert || now - global.lastQrAlert > 5 * 60 * 1000) {
           global.lastQrAlert = now;
           await sendTelegramAlert(
-            `🚨 *QR Requerido*\n\n📷 [Ver QR en alta resolución](${qrLink})\n\nAbre el link y escanéalo con WhatsApp → Dispositivos vinculados.`
+            `🚨 *QR Requerido*\n📷 [Ver QR en alta resolución](${qrLink})\nAbre el link y escanéalo con WhatsApp → Dispositivos vinculados.`
           );
         }
       }
@@ -764,7 +910,7 @@ async function startBot() {
         if (loggedOut) {
           console.log("❌ Sesión cerrada (Logged Out). Necesitas borrar creds en Supabase y re-escanear QR.");
           await sendTelegramAlert(
-            `❌ *Sesión desconectada (Logged Out)*\n\n` +
+            `❌ *Sesión desconectada (Logged Out)*\n` +
             `Borra todas las filas de la tabla \`baileys_auth\` en Supabase y haz redeploy para escanear QR de nuevo.`
           );
         } else {
@@ -821,12 +967,12 @@ console.log("Iniciando en 5s...");
 setTimeout(() => startBot(), 5000);
 
 // ==================== APAGADO LIMPIO (SIGTERM) ====================
-async function shutdown(signal) {
+async function shutdown (signal) {
   console.log(`\n[${signal}] Apagando instancia limpiamente...`);
   global.shuttingDown = true;
   try {
     if (sock) sock.end();
-  } catch (_) {}
+  } catch (_) { }
   setTimeout(() => process.exit(0), 1500);
 }
 
