@@ -92,12 +92,14 @@ async function restoreAuthFromSupabase() {
     fs.mkdirSync(AUTH_FOLDER, { recursive: true });
     
     const folderData = data.value; // objeto con los archivos
-    for (const filename of Object.keys(folderData)) {
-      const filePath = path.join(AUTH_FOLDER, filename);
-      const fileData = folderData[filename];
-      fs.writeFileSync(filePath, JSON.stringify(fileData));
-    }
-    console.log("[Auth] ✅ Carpeta de sesión restaurada desde Supabase.");
+    // Procesar restauración de llaves de forma paralela y veloz
+    await Promise.all(
+      Object.keys(folderData).map(async (filename) => {
+        const filePath = path.join(AUTH_FOLDER, filename);
+        await fs.promises.writeFile(filePath, JSON.stringify(folderData[filename]));
+      })
+    );
+    console.log("[Auth] ✅ Carpeta de sesión restaurada ultrarrápido desde Supabase.");
   } catch (e) {
     if (e.code !== 'PGRST116') {
       console.warn("[Auth] ⚠️ No se pudo restaurar respaldo de Supabase:", e.message);
@@ -108,27 +110,28 @@ async function restoreAuthFromSupabase() {
 async function backupAuthToSupabase() {
   try {
     if (!fs.existsSync(AUTH_FOLDER)) return;
-    const files = fs.readdirSync(AUTH_FOLDER);
+    const files = await fs.promises.readdir(AUTH_FOLDER);
     const folderData = {};
     for (const file of files) {
       if (file.endsWith(".json")) {
         try {
           const filePath = path.join(AUTH_FOLDER, file);
-          const content = fs.readFileSync(filePath, "utf-8");
+          const content = await fs.promises.readFile(filePath, "utf-8");
           if (content) {
             folderData[file] = JSON.parse(content);
           }
         } catch (err) {
-          // Si un archivo está siendo modificado justo en este instante, lo saltamos
+          // Ignorar silenciosamente archivos que se están modificando en este momento
         }
       }
     }
-    const { error } = await supabase.from("baileys_auth").upsert([{ key: "backup_folder", value: folderData }]);
-    if (error) {
-      console.warn("❌ [SupabaseAuth] Error subiendo respaldo:", error.message);
-    } else {
-      console.log(`[SupabaseAuth] ✅ Respaldo subido ok (${Object.keys(folderData).length} archivos).`);
-    }
+    // Subir de forma rápida
+    supabase.from("baileys_auth")
+      .upsert([{ key: "backup_folder", value: folderData }])
+      .then(({ error }) => {
+        if (error) console.warn("❌ [SupabaseAuth] Error en background:", error.message);
+        else console.log(`[SupabaseAuth] ✅ Respaldo ok (${Object.keys(folderData).length} archivos).`);
+      });
   } catch (e) {
     console.warn("❌ [SupabaseAuth] Exception subiendo respaldo:", e.message);
   }
