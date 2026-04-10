@@ -289,7 +289,12 @@ async function reply (chatId, text, quotedMsg) {
       console.warn(`[reply] No sessions en ${chatId} — forzando metadata y reintentando en 5s...`);
       // Forzar a Baileys a descargar la lista de participantes del grupo
       if (chatId.endsWith("@g.us")) {
-        try { await sock.groupMetadata(chatId); } catch (e) { console.warn("Fallo groupMetadata:", e.message); }
+        try {
+          const meta = await sock.groupMetadata(chatId);
+          console.log(`[debug] groupMetadata fetch exitoso. Participantes: ${meta.participants?.length}`);
+        } catch (e) {
+          console.warn("Fallo groupMetadata:", e.message);
+        }
       }
       await new Promise(r => setTimeout(r, 5000));
       await sock.sendMessage(chatId, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
