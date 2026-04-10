@@ -1,4 +1,4 @@
-require('dotenv').config();
+require("dotenv").config();
 const { Client, RemoteAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const fs = require("fs");
@@ -10,14 +10,16 @@ const { createClient } = require("@supabase/supabase-js");
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "TU_SUPABASE_URL";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "TU_SUPABASE_KEY";
-const DATABASE_URL = process.env.DATABASE_URL || "postgres://pass@host:5432/postgres"; // Usar el connection pooling de Supabase
+const DATABASE_URL =
+  process.env.DATABASE_URL || "postgres://pass@host:5432/postgres"; // Usar el connection pooling de Supabase
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const app = express();
 app.get("/", (req, res) => res.send("Bot Activo 24/7 (Render + UptimeRobot)"));
-app.listen(process.env.PORT || 3000, () => console.log("Servidor Express escuchando (Listo para UptimeRobot)"));
-
+app.listen(process.env.PORT || 3000, () =>
+  console.log("Servidor Express escuchando (Listo para UptimeRobot)")
+);
 
 // Opcional: Librerías para correo
 let nodemailer = null;
@@ -53,33 +55,68 @@ async function initCSV() {
 }
 
 async function appendCSV(row) {
-  const fecha = new Date().toLocaleString("es-MX", { timeZone: "America/Mexico_City" });
-  await supabase.from("historial").insert([{
-    fecha,
-    auto: row.autoName,
-    km_actual: row.kmActual,
-    km_recorridos: row.kmRecorridos,
-    litros: row.litros,
-    costo: row.costo,
-    lleno: row.lleno,
-    rendimiento: row.rendimiento,
-    costo_por_km: row.costoPorKm
-  }]);
+  const fecha = new Date().toLocaleString("es-MX", {
+    timeZone: "America/Mexico_City"
+  });
+  await supabase.from("historial").insert([
+    {
+      fecha,
+      auto: row.autoName,
+      km_actual: row.kmActual,
+      km_recorridos: row.kmRecorridos,
+      litros: row.litros,
+      costo: row.costo,
+      lleno: row.lleno,
+      rendimiento: row.rendimiento,
+      costo_por_km: row.costoPorKm
+    }
+  ]);
 }
 
 async function loadCars() {
-  const { data, error } = await supabase.from("cars").select("state_json").eq("id", 1).single();
-  
+  const { data, error } = await supabase
+    .from("cars")
+    .select("state_json")
+    .eq("id", 1)
+    .single();
+
   if (!data || error) {
     const defaults = {
-      car1: { name: "Tiida 🚗", lastKm: null, baseKm: null, accLiters: 0, accCost: 0, lastOilKm: null, lastTireKm: null, poliza: null },
-      car2: { name: "Hyundai 🚙", lastKm: null, baseKm: null, accLiters: 0, accCost: 0, lastOilKm: null, lastTireKm: null, poliza: null },
-      car3: { name: "Chevy 🛻", lastKm: null, baseKm: null, accLiters: 0, accCost: 0, lastOilKm: null, lastTireKm: null, poliza: null }
+      car1: {
+        name: "Tiida 🚗",
+        lastKm: null,
+        baseKm: null,
+        accLiters: 0,
+        accCost: 0,
+        lastOilKm: null,
+        lastTireKm: null,
+        poliza: null
+      },
+      car2: {
+        name: "Hyundai 🚙",
+        lastKm: null,
+        baseKm: null,
+        accLiters: 0,
+        accCost: 0,
+        lastOilKm: null,
+        lastTireKm: null,
+        poliza: null
+      },
+      car3: {
+        name: "Chevy 🛻",
+        lastKm: null,
+        baseKm: null,
+        accLiters: 0,
+        accCost: 0,
+        lastOilKm: null,
+        lastTireKm: null,
+        poliza: null
+      }
     };
     await supabase.from("cars").upsert([{ id: 1, state_json: defaults }]);
     return defaults;
   }
-  
+
   const cars = data.state_json;
   for (const key of ["car1", "car2", "car3"]) {
     if (cars[key] === undefined) cars[key] = {};
@@ -238,6 +275,12 @@ const client = new Client({
 client.on("qr", async (qr) => {
   console.log("\n📱 Escanea este QR con WhatsApp:\n");
   qrcode.generate(qr, { small: true });
+  const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
+  console.log(
+    "\n🔗 ¿Se ve mal? HAZ CLIC O COPIA ESTE LINK PARA VERLO EN HD:\n\n",
+    qrLink,
+    "\n"
+  );
 
   if (EMAIL_USER && EMAIL_PASS && EMAIL_USER !== "") {
     try {
@@ -587,10 +630,10 @@ client.on("message_create", async (msg) => {
     let text = `📋 *Últimos 5 Registros*\n━━━━━━━━━━━━━━\n`;
     for (const row of logs) {
       // row.fecha viene como string tipo "dd/mm/yyyy hh:mm:ss" o el timestamp
-      const fechaLimpia = row.fecha ? row.fecha.split(',')[0] : "";
-      
-      const rendText = row.rendimiento 
-        ? `${parseFloat(row.rendimiento).toFixed(2)} km/L` 
+      const fechaLimpia = row.fecha ? row.fecha.split(",")[0] : "";
+
+      const rendText = row.rendimiento
+        ? `${parseFloat(row.rendimiento).toFixed(2)} km/L`
         : `_Carga Parcial_`;
 
       text += `*${fechaLimpia}* — ${row.auto}\n`;
@@ -951,4 +994,3 @@ client.on("message_create", async (msg) => {
 
 initCSV();
 client.initialize();
-
