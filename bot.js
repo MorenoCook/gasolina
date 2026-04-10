@@ -110,18 +110,32 @@ async function useSupabaseAuthState () {
     try {
       const { data, error } = await supabase
         .from(TABLE).select("value").eq("key", key).single();
-      if (error || !data) return null;
+      if (error) {
+        if (error.code === 'PGRST116') return null; // fila no existe
+        throw error; // error real de red o base de datos
+      }
+      if (!data) return null;
       return deserializeFromDB(data.value);
-    } catch { return null; }
+    } catch (e) {
+      throw new Error(`Error leyendo '${key}' de Supabase: ${e.message}`);
+    }
   }
 
   async function writeData (key, value) {
     try {
-      const { error } = await supabase
-        .from(TABLE).upsert([{ key, value: serializeForDB(value) }]);
-      if (error) console.warn(`[SupabaseAuth] Error guardando '${key}':`, error.message);
+      const payload = serializeForDB(value);
+      const { data, error } = await supabase
+        .from(TABLE).upsert([{ key, value: payload }]).select();
+        
+      if (error) {
+        console.warn(`\n❌ [SupabaseAuth] RECHAZADO: No se pudo guardar la llave '${key}' en la base de datos!`);
+        console.warn(`❌ [SupabaseAuth] Razón de Supabase:`, error.message, error.details || "");
+        console.warn(`❌ [SupabaseAuth] Hint: Revisa que baileys_auth no tenga RLS activado y que 'key' sea Primary Key.\n`);
+      } else {
+        console.log(`✅ [SupabaseAuth] Llave '${key}' guardada / actualizada en tabla baileys_auth.`);
+      }
     } catch (e) {
-      console.warn(`[SupabaseAuth] writeData falló '${key}':`, e.message);
+      console.warn(`\n❌ [SupabaseAuth] CRASH crítico intentando escribir '${key}':`, e.message, "\n");
     }
   }
 
@@ -136,7 +150,13 @@ async function useSupabaseAuthState () {
   const tableOk = testRead !== null || true; // si lanza, catch devuelve null
 
   const { initAuthCreds } = require("@whiskeysockets/baileys");
-  const stored = await readData("creds");
+  let stored = null;
+  try {
+    stored = await readData("creds");
+  } catch (e) {
+    console.error("[Auth] No se pudo conectar a Supabase para cargar la sesión. Cancelando para no borrar datos:", e.message);
+    throw e; // Esto forzará el catch en startBot() y usará filesystem
+  }
   const creds = stored ?? initAuthCreds();
 
   return {
