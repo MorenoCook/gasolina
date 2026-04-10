@@ -710,8 +710,16 @@ async function startBot () {
     const { state, saveCreds } = await useSupabaseAuthState();
     console.log("Auth state cargado. Obteniendo versión de WhatsApp...");
 
-    const { version } = await fetchLatestBaileysVersion();
-    console.log("Versión de WA:", version);
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`Versión de WA: ${version} (isLatest: ${isLatest})`);
+
+    // Caché de reintentos en memoria (soluciona Invalid PreKey y No sessions)
+    // Permite que Baileys le pida al remitente renegociar la sesión si falla al inicio.
+    const msgRetryCounterMap = new Map();
+    const msgRetryCounterCache = {
+      get: (key) => msgRetryCounterMap.get(key),
+      set: (key, value) => msgRetryCounterMap.set(key, value)
+    };
 
     sock = makeWASocket({
       auth: state,
@@ -721,7 +729,13 @@ async function startBot () {
       browser: ["GasolinaBot", "Chrome", "1.0.0"],
       connectTimeoutMs: 60000,
       // Reintentar peticiones fallidas con un delay para evitar ban temporal
-      retryRequestDelayMs: 2000
+      retryRequestDelayMs: 2000,
+      // Requerido para curar sesiones de grupos (No sessions / Invalid PreKey)
+      msgRetryCounterCache,
+      getMessage: async (key) => {
+        // Fallback básico para que Baileys sepa que debe pedir un reintento
+        return { conversation: "Buscando mensaje..." };
+      }
     });
 
     sock.ev.on("creds.update", saveCreds);
