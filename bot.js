@@ -13,6 +13,19 @@ const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
 const pino = require("pino");
 
+// Proxy opcional (para evadir bloqueo de IPs de Render por WhatsApp)
+// Configura en Render: HTTPS_PROXY_URL=http://user:pass@proxy-host:port
+let proxyAgent;
+if (process.env.HTTPS_PROXY_URL) {
+  try {
+    const { HttpsProxyAgent } = require("https-proxy-agent");
+    proxyAgent = new HttpsProxyAgent(process.env.HTTPS_PROXY_URL);
+    console.log(`[Proxy] Usando proxy: ${process.env.HTTPS_PROXY_URL.replace(/:.*@/, ":***@")}`);
+  } catch (e) {
+    console.warn("[Proxy] https-proxy-agent no instalado, ignorando proxy:", e.message);
+  }
+}
+
 // Logger silencioso para Baileys (evitar spam de logs internos)
 const logger = pino({ level: "silent" });
 
@@ -752,6 +765,8 @@ async function startBot() {
       browser: Browsers.ubuntu("Chrome"),
       syncFullHistory: false,   // No descargar historial — ahorra RAM y tiempo
       getMessage: async () => undefined,
+      // Proxy residencial para evadir bloqueo de IPs de Render (opcional)
+      ...(proxyAgent ? { agent: proxyAgent, fetchAgent: proxyAgent } : {}),
     });
 
     // Guardar credenciales cuando cambien (persistencia en Supabase)
