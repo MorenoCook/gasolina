@@ -1229,47 +1229,27 @@ async function startBot() {
           console.log("\n📱 Escanea este QR con WhatsApp:\n");
           qrcode.generate(qr, { small: true });
           const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
-          console.log("\n🔗 COPIA ESTE LINK para verlo en HD:\n");
-          console.log(qrLink);
-          console.log("");
+          console.log(`\n🔗 LINK HD: ${qrLink}\n`);
 
-          if (usePairingCode) {
-            // Mandar AMBOS: código de pairing + QR HD link
-            const now = Date.now();
-            if (!global.lastQrAlert || now - global.lastQrAlert > 30_000) {
-              global.lastQrAlert = now;
-              const codeText = global.lastPairingCode
-                ? `🔑 *Código:* \`${global.lastPairingCode}\`\n⚙️ _Dispositivos vinculados → Vincular con número_\n\n`
-                : "";
-              await sendTelegramAlert(
-                `${codeText}` +
-                `📷 *QR alternativo:*\n[Ver QR en alta resolución](${qrLink})\n\n` +
-                `_Usa cualquiera de las dos opciones._`,
-                {
-                  inline_keyboard: [
-                    [{ text: "📲 Abrir WhatsApp", url: "https://wa.me/" }]
-                  ]
-                }
-              );
-            }
-            return;
-          }
-
-          // Modo solo QR (sin pairing code)
-
-          // Throttle de 30s: cada QR dura ~20-60s, así el usuario recibe uno fresco
-          // sin recibir spam si WA genera varios QRs seguidos al arrancar.
           const now = Date.now();
+          // Throttle de 30s para no hacer spam en Telegram
           if (!global.lastQrAlert || now - global.lastQrAlert > 30_000) {
             global.lastQrAlert = now;
-            global.qrAlertCount = (global.qrAlertCount || 0) + 1;
-            const aviso =
-              global.qrAlertCount >= 3
-                ? `\n⚠️ _Este es el QR #${global.qrAlertCount}. Si sigues sin poder conectar, haz redeploy._`
-                : "";
-            await sendTelegramAlert(
-              `🚨 *QR Requerido* (escanea en los próximos 30s)\n📷 [Ver QR en alta resolución](${qrLink})\nWhatsApp → Dispositivos vinculados → Vincular dispositivo.${aviso}`
-            );
+            
+            if (usePairingCode && global.lastPairingCode) {
+              await sendTelegramAlert(
+                `🔑 *Código:* \`${global.lastPairingCode}\`\n⚙️ _Dispositivos vinculados → Vincular con número_\n\n` +
+                `📷 *QR alternativo:*\n[Ver QR en alta resolución](${qrLink})\n\n` +
+                `_Usa cualquiera de las opciones._`,
+                { inline_keyboard: [[{ text: "📲 Abrir WhatsApp", url: "https://wa.me/" }]] }
+              );
+            } else {
+              global.qrAlertCount = (global.qrAlertCount || 0) + 1;
+              const aviso = global.qrAlertCount >= 3 ? `\n⚠️ _Este es el QR #${global.qrAlertCount}. Si no conecta, haz redeploy._` : "";
+              await sendTelegramAlert(
+                `🚨 *QR Requerido*\n📷 [Ver QR HD](${qrLink})\nWhatsApp → Dispositivos vinculados → Vincular dispositivo.${aviso}`
+              );
+            }
           }
         }
 
