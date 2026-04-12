@@ -815,7 +815,8 @@ async function startBot () {
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
       // Presentarse con MacOS Desktop — suele acelerar el proceso de "Logging in" en Meta
-      browser: Browsers.macOS("Desktop"),
+      // Ubuntu/Chrome fingerprint — tiene menos rechazo en IPs de datacenter que macOS Desktop
+      browser: Browsers.ubuntu("Chrome"),
       syncFullHistory: false,
       // Si alguien pide retrasmisión, buscar en cache en lugar de pedir a WA
       // Evita timeouts 408 causados por usuarios con versiones viejas
@@ -824,11 +825,43 @@ async function startBot () {
         return cached ?? { conversation: "" };
       },
       // Mantener conexión viva y no desconectar por inactividad
-      keepAliveIntervalMs: 30_000,
-      retryRequestDelayMs: 250,
+      keepAliveIntervalMs: 25_000,
+      retryRequestDelayMs: 500,
+      // Timeouts extendidos: WA ralentiza el handshake en IPs de datacenter (Render).
+      // El default de 20s es insuficiente; 90s da margen para que el "Logging in" complete.
+      connectTimeoutMs: 90_000,
+      defaultQueryTimeoutMs: 90_000,
       // Proxy residencial para evadir bloqueo de IPs de Render (opcional)
       ...(proxyAgent ? { agent: proxyAgent, fetchAgent: proxyAgent } : {}),
     });
+
+    // ==================== PAIRING CODE (alternativa al QR) ====================
+    // Si WA_PHONE_NUMBER está definido, usar código de texto en vez de QR.
+    // El usuario lo ingresa en: WhatsApp → Config → Dispositivos vinculados → Vincular con número.
+    const usePairingCode = !!process.env.WA_PHONE_NUMBER && !state.creds.registered;
+    if (usePairingCode) {
+      // Esperar un tick para que el socket esté listo antes de pedir el código
+      setTimeout(async () => {
+        try {
+          const phone = process.env.WA_PHONE_NUMBER.replace(/[^0-9]/g, "");
+          const code  = await sock.requestPairingCode(phone);
+          // Formatear como XXXX-XXXX para que sea legible
+          const formatted = code.match(/.{1,4}/g)?.join("-") ?? code;
+          console.log(`[Auth] 🔑 Código de vinculación: ${formatted}`);
+          await sendTelegramAlert(
+            `🔑 *Código de Vinculación WhatsApp*\n\n` +
+            `\`${formatted}\`\n\n` +
+            `En tu WhatsApp:\n` +
+            `⚙️ _Configuración → Dispositivos vinculados → Vincular con número de teléfono_\n\n` +
+            `_Tienes unos minutos antes de que expire._`
+          );
+        } catch (e) {
+          console.error("[Auth] ❌ Error solicitando pairing code:", e.message);
+          // Si falla el pairing code, avisar por Telegram para que usen QR
+          await sendTelegramAlert(`⚠️ No se pudo obtener Pairing Code: ${e.message}\nRevisa que WA_PHONE_NUMBER sea correcto (solo dígitos, con código de país).`);
+        }
+      }, 3000);
+    }
 
     // Guardar credenciales cuando cambien (persistencia en disco y Supabase)
     sock.ev.on("creds.update", async () => {
@@ -866,6 +899,13 @@ async function startBot () {
       console.log(`[Conexión] estado=${connection ?? "(actualizando)"} código=${lastDisconnect?.error?.output?.statusCode ?? "-"}`);
 
       if (qr) {
+        if (usePairingCode) {
+          // Si hay pairing code activo, ignorar el QR que genera Baileys internamente.
+          // El código ya fue enviado a Telegram en el bloque de arriba.
+          console.log("[Auth] QR ignorado — usando Pairing Code.");
+          return;
+        }
+
         console.log("\n📱 Escanea este QR con WhatsApp:\n");
         qrcode.generate(qr, { small: true });
         const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`;
