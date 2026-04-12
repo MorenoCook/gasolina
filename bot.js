@@ -861,9 +861,9 @@ async function startBot () {
           await sendTelegramAlert(
             `🔑 *Código de Vinculación WhatsApp*\n\n` +
             `\`${formatted}\`\n\n` +
-            `En tu WhatsApp:\n` +
+            `👉 [Abrir WhatsApp](whatsapp://settings)\n\n` +
             `⚙️ _Configuración → Dispositivos vinculados → Vincular con número de teléfono_\n\n` +
-            `_Espera el ✅ de conexión aunque WA tarde unos minutos en procesar._`
+            `_Ingresa el código de arriba y espera el ✅._`
           );
         } catch (e) {
           pairingCodeRequested = false;  // permitir reintento si falló por error
