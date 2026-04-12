@@ -315,6 +315,11 @@ const debouncedBackup = () => {
   }, 5000);
 };
 
+// Flag para evitar solicitar múltiples pairing codes mientras WA procesa el login.
+// WhatsApp es lento con IPs de datacenter y startBot() se llama de nuevo antes
+// de que termine, lo que genera un segundo código innecesario.
+let pairingCodeRequested = false;
+
 // Extrae el texto del mensaje — compatible con versiones viejas de WhatsApp
 function getMessageText (message) {
   return (
@@ -839,7 +844,8 @@ async function startBot () {
     // Si WA_PHONE_NUMBER está definido, usar código de texto en vez de QR.
     // El usuario lo ingresa en: WhatsApp → Config → Dispositivos vinculados → Vincular con número.
     const usePairingCode = !!process.env.WA_PHONE_NUMBER && !state.creds.registered;
-    if (usePairingCode) {
+    if (usePairingCode && !pairingCodeRequested) {
+      pairingCodeRequested = true;  // bloquear para no generar otro en la siguiente reconexión
       // Esperar un tick para que el socket esté listo antes de pedir el código
       setTimeout(async () => {
         try {
@@ -853,11 +859,11 @@ async function startBot () {
             `\`${formatted}\`\n\n` +
             `En tu WhatsApp:\n` +
             `⚙️ _Configuración → Dispositivos vinculados → Vincular con número de teléfono_\n\n` +
-            `_Tienes unos minutos antes de que expire._`
+            `_Espera el ✅ de conexión aunque WA tarde unos minutos en procesar._`
           );
         } catch (e) {
+          pairingCodeRequested = false;  // permitir reintento si falló por error
           console.error("[Auth] ❌ Error solicitando pairing code:", e.message);
-          // Si falla el pairing code, avisar por Telegram para que usen QR
           await sendTelegramAlert(`⚠️ No se pudo obtener Pairing Code: ${e.message}\nRevisa que WA_PHONE_NUMBER sea correcto (solo dígitos, con código de país).`);
         }
       }, 3000);
@@ -956,9 +962,10 @@ async function startBot () {
           await sendTelegramAlert(`✅ *Bot reconectado exitosamente* tras ${retryCount} intento(s).`);
         }
         retryCount = 0;
-        // Resetear contador de QRs al conectar exitosamente
-        global.qrAlertCount = 0;
-        global.lastQrAlert  = null;
+        // Resetear flags de auth para que una futura desconexión pueda pedir código/QR de nuevo
+        pairingCodeRequested = false;
+        global.qrAlertCount  = 0;
+        global.lastQrAlert   = null;
 
         if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
           setTimeout(async () => {
