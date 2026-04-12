@@ -304,6 +304,17 @@ function buildAlertas (car, km) {
 let sock;
 let retryCount = 0;
 
+// ── Intervalos y timers a nivel de módulo (NO dentro de startBot)
+// para que las reconexiones no los dupliquen.
+let backupInterval = null;
+let backupTimeout  = null;
+const debouncedBackup = () => {
+  if (backupTimeout) clearTimeout(backupTimeout);
+  backupTimeout = setTimeout(async () => {
+    await backupAuthToSupabase();
+  }, 5000);
+};
+
 // Extrae el texto del mensaje — compatible con versiones viejas de WhatsApp
 function getMessageText (message) {
   return (
@@ -787,17 +798,10 @@ async function startBot () {
       try { sock.end(); } catch (e) {}
     }
 
-    // Backup periódico constante y más rápido para no perder llaves de sesión
-    setInterval(backupAuthToSupabase, 60 * 1000); // 1 minuto
-
-    // Sistema de guardado a Supabase optimizado (debounce de 5 seg)
-    let backupTimeout = null;
-    const debouncedBackup = () => {
-      if (backupTimeout) clearTimeout(backupTimeout);
-      backupTimeout = setTimeout(async () => {
-        await backupAuthToSupabase();
-      }, 5000); 
-    };
+    // Backup periódico: solo registrar UNA vez aunque startBot se llame varias veces
+    if (!backupInterval) {
+      backupInterval = setInterval(backupAuthToSupabase, 60 * 1000); // 1 minuto
+    }
 
     // Cache de mensajes recientes para retrasmisión (evita timeouts con WA viejos)
     const msgCache = new Map();
@@ -869,11 +873,17 @@ async function startBot () {
         console.log(qrLink);
         console.log("");
 
+        // Throttle de 30s: cada QR dura ~20-60s, así el usuario recibe uno fresco
+        // sin recibir spam si WA genera varios QRs seguidos al arrancar.
         const now = Date.now();
-        if (!global.lastQrAlert || now - global.lastQrAlert > 5 * 60 * 1000) {
+        if (!global.lastQrAlert || now - global.lastQrAlert > 30_000) {
           global.lastQrAlert = now;
+          global.qrAlertCount = (global.qrAlertCount || 0) + 1;
+          const aviso = global.qrAlertCount >= 3
+            ? `\n⚠️ _Este es el QR #${global.qrAlertCount}. Si sigues sin poder conectar, haz redeploy._`
+            : "";
           await sendTelegramAlert(
-            `🚨 *QR Requerido*\n📷 [Ver QR en alta resolución](${qrLink})\nAbre el link y escanéalo con WhatsApp → Dispositivos vinculados.`
+            `🚨 *QR Requerido* (escanea en los próximos 30s)\n📷 [Ver QR en alta resolución](${qrLink})\nWhatsApp → Dispositivos vinculados → Vincular dispositivo.${aviso}`
           );
         }
       }
@@ -906,6 +916,9 @@ async function startBot () {
           await sendTelegramAlert(`✅ *Bot reconectado exitosamente* tras ${retryCount} intento(s).`);
         }
         retryCount = 0;
+        // Resetear contador de QRs al conectar exitosamente
+        global.qrAlertCount = 0;
+        global.lastQrAlert  = null;
 
         if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
           setTimeout(async () => {
