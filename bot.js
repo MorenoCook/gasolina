@@ -1288,6 +1288,15 @@ async function startBot() {
 
         if (connection === "open") {
           console.log("✅ Bot conectado y listo!\n");
+          
+          // FORZAR GUARDADO EN DISCO Y SUBIDA A SUPABASE DE INMEDIATO
+          // Fix para bug de Baileys: a veces Pairing Code deja registered en false.
+          sock.authState.creds.registered = true;
+          try {
+            await saveCreds(); 
+            backupAuthToSupabase();
+          } catch(e) {}
+
           if (retryCount > 0) {
             await sendTelegramAlert(
               `✅ *Bot reconectado exitosamente* tras ${retryCount} intento(s).`
