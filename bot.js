@@ -823,6 +823,11 @@ async function startBot () {
       // Ubuntu/Chrome fingerprint — tiene menos rechazo en IPs de datacenter que macOS Desktop
       browser: Browsers.ubuntu("Chrome"),
       syncFullHistory: false,
+      // ⚡ NO disparar queries iniciales (contactos, grupos, presencia).
+      // Esto es lo que causa el "Logging in" de 3+ min en IPs de datacenter.
+      fireInitQueries: false,
+      // No marcar "en línea" al conectar — ahorra otro roundtrip lento
+      markOnlineOnConnect: false,
       // Si alguien pide retrasmisión, buscar en cache en lugar de pedir a WA
       // Evita timeouts 408 causados por usuarios con versiones viejas
       getMessage: async (key) => {
@@ -831,11 +836,10 @@ async function startBot () {
       },
       // Mantener conexión viva y no desconectar por inactividad
       keepAliveIntervalMs: 25_000,
-      retryRequestDelayMs: 500,
+      retryRequestDelayMs: 250,
       // Timeouts extendidos: WA ralentiza el handshake en IPs de datacenter (Render).
-      // El default de 20s es insuficiente; 90s da margen para que el "Logging in" complete.
-      connectTimeoutMs: 90_000,
-      defaultQueryTimeoutMs: 90_000,
+      connectTimeoutMs: 60_000,
+      defaultQueryTimeoutMs: 60_000,
       // Proxy residencial para evadir bloqueo de IPs de Render (opcional)
       ...(proxyAgent ? { agent: proxyAgent, fetchAgent: proxyAgent } : {}),
     });
@@ -847,7 +851,7 @@ async function startBot () {
     if (usePairingCode && !pairingCodeRequested) {
       pairingCodeRequested = true;  // bloquear para no generar otro en la siguiente reconexión
       // Esperar un tick para que el socket esté listo antes de pedir el código
-      setTimeout(async () => {
+      setTimeout(async () => {  // 1s basta para que socket esté listo
         try {
           const phone = process.env.WA_PHONE_NUMBER.replace(/[^0-9]/g, "");
           const code  = await sock.requestPairingCode(phone);
@@ -866,7 +870,7 @@ async function startBot () {
           console.error("[Auth] ❌ Error solicitando pairing code:", e.message);
           await sendTelegramAlert(`⚠️ No se pudo obtener Pairing Code: ${e.message}\nRevisa que WA_PHONE_NUMBER sea correcto (solo dígitos, con código de país).`);
         }
-      }, 3000);
+      }, 1000);
     }
 
     // Guardar credenciales cuando cambien (persistencia en disco y Supabase)
@@ -1002,8 +1006,8 @@ async function startBot () {
   }
 }
 
-console.log("Iniciando en 5s...");
-setTimeout(() => startBot(), 5000);
+// Arrancar inmediato — no hay razón para esperar 5s
+startBot();
 
 // ==================== APAGADO LIMPIO (SIGTERM) ====================
 async function shutdown (signal) {
