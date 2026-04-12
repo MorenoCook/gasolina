@@ -55,18 +55,20 @@ app.listen(process.env.PORT || 3000, () =>
 );
 
 // ==================== ALERTAS TELEGRAM ====================
-async function sendTelegramAlert (message) {
+async function sendTelegramAlert (message, replyMarkup) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+    const payload = {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: `🤖 *GasolinaBot*\n${message}`,
+      parse_mode: "Markdown",
+    };
+    if (replyMarkup) payload.reply_markup = replyMarkup;
     await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: `🤖 *GasolinaBot*\n${message}`,
-        parse_mode: "Markdown",
-      }),
+      body: JSON.stringify(payload),
     });
   } catch (e) {
     console.warn("[Telegram] No se pudo enviar alerta:", e.message);
@@ -861,9 +863,13 @@ async function startBot () {
           await sendTelegramAlert(
             `🔑 *Código de Vinculación WhatsApp*\n\n` +
             `\`${formatted}\`\n\n` +
-            `👉 [Abrir WhatsApp](whatsapp://settings)\n\n` +
-            `⚙️ _Configuración → Dispositivos vinculados → Vincular con número de teléfono_\n\n` +
-            `_Ingresa el código de arriba y espera el ✅._`
+            `⚙️ _Dispositivos vinculados → Vincular con número de teléfono_\n\n` +
+            `_Ingresa el código de arriba y espera el ✅._`,
+            {
+              inline_keyboard: [[
+                { text: "📲 Abrir WhatsApp", url: "https://wa.me/" }
+              ]]
+            }
           );
         } catch (e) {
           pairingCodeRequested = false;  // permitir reintento si falló por error
