@@ -143,6 +143,10 @@ async function backupAuthToSupabase() {
       console.warn("[SupabaseAuth] ⚠️ Sesión local no está registrada (registered=false). Abortando respaldo.");
       return;
     }
+    if (files.length < 20) {
+      console.warn("[SupabaseAuth] ⚠️ Muy pocos archivos en .auth_baileys (" + files.length + "). Probable race condition. Abortando respaldo.");
+      return;
+    }
 
     const folderData = {};
     for (const file of files) {
@@ -1198,7 +1202,9 @@ async function startBot() {
     }
 
     // Guardar credenciales localmente (sin backup asíncrono para no trabar el thread de node durante login)
-    sock.ev.on("creds.update", async () => {
+    sock.ev.on("creds.update", async (update) => {
+      // Si Baileys intenta revertir el registered a false mientras estamos conectados, lo evitamos
+      if (global.isConnected) sock.authState.creds.registered = true;
       await saveCreds();
     });
 
@@ -1266,6 +1272,7 @@ async function startBot() {
         }
 
         if (connection === "close") {
+          global.isConnected = false;
           const statusCode =
             lastDisconnect?.error instanceof Boom
               ? lastDisconnect.error.output.statusCode
@@ -1294,14 +1301,15 @@ async function startBot() {
 
         if (connection === "open") {
           console.log("✅ Bot conectado y listo!\n");
+          global.isConnected = true;
           
-          // FORZAR GUARDADO EN DISCO Y SUBIDA A SUPABASE DE INMEDIATO
-          // Fix para bug de Baileys: a veces Pairing Code deja registered en false.
           sock.authState.creds.registered = true;
-          try {
-            await saveCreds(); 
-            backupAuthToSupabase();
-          } catch(e) {}
+          try { await saveCreds(); } catch(e) {}
+          
+          // Darle a Baileys 15 segundos para volcar todos los pre-keys y app-state al disco, LUEGO respaldar
+          setTimeout(() => {
+            if (global.isConnected) backupAuthToSupabase();
+          }, 15000);
 
           retryCount = 0;
           pairingCodeRequested = false;
