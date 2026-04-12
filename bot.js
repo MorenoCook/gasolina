@@ -396,6 +396,7 @@ let retryCount = 0;
 
 // ── Intervalos y timers a nivel de módulo (NO dentro de startBot)
 // para que las reconexiones no los dupliquen.
+// Background backup execution context
 let backupInterval = null;
 let backupTimeout = null;
 const debouncedBackup = () => {
@@ -1084,9 +1085,7 @@ async function startBot() {
       );
     }
 
-    // Descargar respaldo desde Supabase antes de iniciar
-    await restoreAuthFromSupabase();
-
+    // Quitado de aquí: restoreAuthFromSupabase() se llama ahora UNA VEZ al inicio del script.
     // Usar Auth ultrarrápido local en disco para que no haya timeouts
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
@@ -1097,9 +1096,9 @@ async function startBot() {
       } catch (e) {}
     }
 
-    // Backup periódico: solo registrar UNA vez aunque startBot se llame varias veces
+    // Backup periódico cada 2 minutos (independiente de creds.update para no lagear el login)
     if (!backupInterval) {
-      backupInterval = setInterval(backupAuthToSupabase, 60 * 1000); // 1 minuto
+      backupInterval = setInterval(backupAuthToSupabase, 120 * 1000); // 2 minutos
     }
 
     // Cache de mensajes recientes para retrasmisión (evita timeouts con WA viejos)
@@ -1117,11 +1116,10 @@ async function startBot() {
       // Ubuntu/Chrome fingerprint — tiene menos rechazo en IPs de datacenter que macOS Desktop
       browser: Browsers.ubuntu("Chrome"),
       syncFullHistory: false,
-      // ⚡ NO disparar queries iniciales (contactos, grupos, presencia).
-      // Esto es lo que causa el "Logging in" de 3+ min en IPs de datacenter.
-      fireInitQueries: false,
-      // No marcar "en línea" al conectar — ahorra otro roundtrip lento
-      markOnlineOnConnect: false,
+      // ⚡ Para primera sesión (QR/Código) WhatsApp EXIGE que se pidan los queries iniciales.
+      // Si se bloquean (fireInitQueries: false), tira Error 515 (Stream Out of Sync).
+      // fireInitQueries: false,
+      // markOnlineOnConnect: false,
       // Si alguien pide retrasmisión, buscar en cache en lugar de pedir a WA
       // Evita timeouts 408 causados por usuarios con versiones viejas
       getMessage: async (key) => {
@@ -1184,10 +1182,9 @@ async function startBot() {
       }, 1000);
     }
 
-    // Guardar credenciales cuando cambien (persistencia en disco y Supabase)
+    // Guardar credenciales localmente (sin backup asíncrono para no trabar el thread de node durante login)
     sock.ev.on("creds.update", async () => {
       await saveCreds();
-      debouncedBackup();
     });
 
     // Cachear mensajes enviados para retrasmisión
@@ -1330,8 +1327,12 @@ async function startBot() {
   }
 }
 
-// Arrancar inmediato — no hay razón para esperar 5s
-startBot();
+// Arrancar inicial
+(async () => {
+  console.log("Restaurando sesión desde Supabase (solo una vez al inicio)...");
+  await restoreAuthFromSupabase();
+  startBot();
+})();
 
 // ==================== APAGADO LIMPIO (SIGTERM) ====================
 async function shutdown(signal) {
