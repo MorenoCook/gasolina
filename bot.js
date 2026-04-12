@@ -1149,11 +1149,29 @@ async function startBot() {
       setTimeout(async () => {
         // 1s basta para que socket esté listo
         try {
-          const phone = process.env.WA_PHONE_NUMBER.replace(/[^0-9]/g, "");
-          const code = await sock.requestPairingCode(phone);
+          let phone = process.env.WA_PHONE_NUMBER.replace(/[^0-9]/g, "");
+          let code;
+          try {
+            code = await sock.requestPairingCode(phone);
+          } catch (firstErr) {
+            // Si falla, probar formato alterno para números MX (52 vs 521)
+            let altPhone = null;
+            if (phone.startsWith("521")) {
+              altPhone = "52" + phone.slice(3); // quitar el 1
+            } else if (phone.startsWith("52") && !phone.startsWith("521")) {
+              altPhone = "521" + phone.slice(2); // agregar el 1
+            }
+            if (altPhone) {
+              console.log(`[Auth] Formato ${phone} falló, reintentando con ${altPhone}...`);
+              code = await sock.requestPairingCode(altPhone);
+              phone = altPhone;
+            } else {
+              throw firstErr;
+            }
+          }
           // Formatear como XXXX-XXXX para que sea legible
           const formatted = code.match(/.{1,4}/g)?.join("-") ?? code;
-          console.log(`[Auth] 🔑 Código de vinculación: ${formatted}`);
+          console.log(`[Auth] 🔑 Código de vinculación: ${formatted} (número: ${phone})`);
           // Guardar código — se enviará junto con QR HD link cuando llegue
           global.lastPairingCode = formatted;
         } catch (e) {
