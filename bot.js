@@ -102,15 +102,25 @@ async function restoreAuthFromSupabase() {
     }
     fs.mkdirSync(AUTH_FOLDER, { recursive: true });
 
-    const folderData = data.value; // objeto con los archivos
+    let folderData = data.value;
+    if (typeof folderData === "string") {
+      try {
+        folderData = JSON.parse(folderData);
+      } catch (e) {
+        console.warn("[Auth] ⚠️ Error parseando JSON de Supabase. El respaldo está corrupto.");
+        return;
+      }
+    }
+
     // Procesar restauración de llaves de forma paralela y veloz
     await Promise.all(
       Object.keys(folderData).map(async (filename) => {
         const filePath = path.join(AUTH_FOLDER, filename);
-        await fs.promises.writeFile(
-          filePath,
-          JSON.stringify(folderData[filename])
-        );
+        // Escribir archivo asegurando string o Buffer según el caso
+        const fileContent = typeof folderData[filename] === "string" 
+                            ? folderData[filename] 
+                            : JSON.stringify(folderData[filename]);
+        await fs.promises.writeFile(filePath, fileContent);
       })
     );
     console.log(
