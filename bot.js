@@ -282,7 +282,8 @@ function parseRegistroExpress(textoOriginal) {
     carKey = "car3";
   if (!carKey) return null;
 
-  const cleanLower = lower.replace(/(\d)\s+(\d)/g, "$1$2");
+  // Quitar espacios y tabs entre números para km como "259 270", pero NO quitar saltos de línea (\n)
+  const cleanLower = lower.replace(/(\d)[ \t]+(\d)/g, "$1$2");
 
   const kmMatch = cleanLower.match(/km\s*[:\-]?\s*(\d+[,]?\d*)/i);
   let km = null;
