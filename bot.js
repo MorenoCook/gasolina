@@ -1303,29 +1303,16 @@ async function startBot() {
             backupAuthToSupabase();
           } catch(e) {}
 
-          if (retryCount > 0) {
-            await sendTelegramAlert(
-              `✅ *Bot reconectado exitosamente* tras ${retryCount} intento(s).`
-            );
-          }
           retryCount = 0;
-          // Resetear flags de auth para que una futura desconexión pueda pedir código/QR de nuevo
           pairingCodeRequested = false;
           global.qrAlertCount = 0;
           global.lastQrAlert = null;
 
-          if (GRUPO_PERMITIDO && GRUPO_PERMITIDO !== "") {
-            setTimeout(async () => {
-              try {
-                await sock.sendMessage(GRUPO_PERMITIDO, {
-                  text: "Sistema reiniciado"
-                });
-                console.log("Mensaje de reinicio enviado al grupo.");
-              } catch (e) {
-                console.error("No se pudo notificar al grupo:", e.message);
-              }
-            }, 5000);
-          }
+          setTimeout(async () => {
+            try {
+              await sendTelegramAlert(`✅ *Sistema Reiniciado*\nBot conectado de forma estable a WhatsApp.`);
+            } catch(e) {}
+          }, 5000);
         }
       }
     );
