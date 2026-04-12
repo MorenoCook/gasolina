@@ -158,6 +158,12 @@ async function backupAuthToSupabase() {
         }
       }
     }
+    // VERIFICACIÓN FINAL: Evitar subir cosas si creds.json falló al leerse por Race Condition
+    if (!folderData["creds.json"] || !folderData["creds.json"].registered) {
+      console.warn("[SupabaseAuth] ⚠️ creds.json fue corrompido o ignorado por lectura simultánea. Abortando respaldo.");
+      return;
+    }
+
     // Subir de forma rápida
     await supabase
       .from("baileys_auth")
