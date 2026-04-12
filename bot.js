@@ -130,6 +130,20 @@ async function backupAuthToSupabase() {
   try {
     if (!fs.existsSync(AUTH_FOLDER)) return;
     const files = await fs.promises.readdir(AUTH_FOLDER);
+    
+    // VERIFICACIÓN DE SEGURIDAD: No sobrescribir una sesión buena con una incompleta
+    const credsPath = path.join(AUTH_FOLDER, "creds.json");
+    if (!fs.existsSync(credsPath)) {
+      console.warn("[SupabaseAuth] ⚠️ No hay creds.json local. Abortando respaldo para evitar corromper la BD.");
+      return;
+    }
+    const credsContent = await fs.promises.readFile(credsPath, "utf-8");
+    const creds = JSON.parse(credsContent);
+    if (!creds.registered) {
+      console.warn("[SupabaseAuth] ⚠️ Sesión local no está registrada (registered=false). Abortando respaldo.");
+      return;
+    }
+
     const folderData = {};
     for (const file of files) {
       if (file.endsWith(".json")) {
@@ -145,17 +159,11 @@ async function backupAuthToSupabase() {
       }
     }
     // Subir de forma rápida
-    supabase
+    await supabase
       .from("baileys_auth")
-      .upsert([{ key: "backup_folder", value: folderData }])
-      .then(({ error }) => {
-        if (error)
-          console.warn("❌ [SupabaseAuth] Error en background:", error.message);
-        else
-          console.log(
-            `[SupabaseAuth] ✅ Respaldo ok (${Object.keys(folderData).length} archivos).`
-          );
-      });
+      .upsert([{ key: "backup_folder", value: folderData }]);
+      
+    console.log(`[SupabaseAuth] ✅ Respaldo ok (${Object.keys(folderData).length} archivos).`);
   } catch (e) {
     console.warn("❌ [SupabaseAuth] Exception subiendo respaldo:", e.message);
   }
