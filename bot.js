@@ -422,6 +422,7 @@ function buildAlertas(car, km) {
 // ==================== BOT PRINCIPAL (BAILEYS) ====================
 let sock;
 let retryCount = 0;
+let reconnectTimeout = null;
 
 // ── Intervalos y timers a nivel de módulo (NO dentro de startBot)
 // para que las reconexiones no los dupliquen.
@@ -1121,8 +1122,11 @@ async function startBot() {
     // Cerrar socket viejo en caso de reconexión para no duplicar listeners
     if (sock) {
       try {
+        sock.ev.removeAllListeners();
+        sock.ws?.close();
         sock.end();
       } catch (e) {}
+      sock = null;
     }
 
     // Backup periódico cada 2 minutos (independiente de creds.update para no lagear el login)
@@ -1245,9 +1249,12 @@ async function startBot() {
     });
 
     // Conexión, QR y reconexión
+    const currentSock = sock;
     sock.ev.on(
       "connection.update",
       async ({ connection, lastDisconnect, qr }) => {
+        if (currentSock !== sock) return; // Evitar eventos fantasma de sockets viejos
+        
         // Log every state change for diagnostics
         console.log(
           `[Conexión] estado=${connection ?? "(actualizando)"} código=${lastDisconnect?.error?.output?.statusCode ?? "-"}`
@@ -1305,12 +1312,20 @@ async function startBot() {
             retryCount++;
             const delay = Math.min(retryCount * 5000, 60000);
             console.log(`Reintento #${retryCount} en ${delay / 1000}s...`);
-            setTimeout(() => startBot(), delay);
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            reconnectTimeout = setTimeout(() => {
+                reconnectTimeout = null;
+                startBot();
+            }, delay);
           }
         }
 
         if (connection === "open") {
           console.log("✅ Bot conectado y listo!\n");
+          if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+          }
           global.isConnected = true;
           
           sock.authState.creds.registered = true;
@@ -1352,7 +1367,11 @@ async function startBot() {
     retryCount++;
     const delay = Math.min(retryCount * 5000, 60000);
     console.log(`Reintento #${retryCount} en ${delay / 1000}s...`);
-    setTimeout(() => startBot(), delay);
+    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    reconnectTimeout = setTimeout(() => {
+        reconnectTimeout = null;
+        startBot();
+    }, delay);
   }
 }
 
