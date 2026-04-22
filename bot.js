@@ -59,6 +59,17 @@ app.listen(process.env.PORT || 3000, () =>
   console.log("Servidor Express escuchando (Listo para UptimeRobot)")
 );
 
+// ==================== KEEPALIVE SUPABASE ====================
+// Evita que Supabase pause el proyecto (Free Tier) tras 7 días sin actividad
+setInterval(async () => {
+  try {
+    await supabase.from("cars").select("id").limit(1);
+    console.log("[Supabase KeepAlive] Ping exitoso a BD para evitar suspensión.");
+  } catch (e) {
+    console.warn("[Supabase KeepAlive] Error en ping:", e.message);
+  }
+}, 1000 * 60 * 60 * 24); // Hace ping a la BD cada 24 horas
+
 // ==================== ALERTAS TELEGRAM ====================
 async function sendTelegramAlert(message, replyMarkup) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -1308,6 +1319,14 @@ async function startBot() {
               `❌ *Sesión desconectada (Logged Out)*\n` +
                 `Borra todas las filas de la tabla \`baileys_auth\` en Supabase y haz redeploy para escanear QR de nuevo.`
             );
+          } else if (statusCode === 440) {
+            console.log(
+              "⚠️ Error 440: Conexión robada por otra instancia. Apagando este proceso zombie para evitar bucle de conexión..."
+            );
+            await sendTelegramAlert(
+              `⚠️ *Error 440 (Tug of War)*\nOtra instancia de Render (quizás un despliegue sin caída) robó la sesión de WhatsApp.\nApagando proceso zombie para limpiar la instancia...`
+            );
+            process.exit(1);
           } else {
             retryCount++;
             const delay = Math.min(retryCount * 5000, 60000);
