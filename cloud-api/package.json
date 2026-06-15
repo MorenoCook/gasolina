@@ -1,0 +1,16 @@
+{
+  "name": "gasolina-cloud-api",
+  "version": "1.0.0",
+  "description": "Bot de gasolina sobre WhatsApp Cloud API (oficial Meta). Independiente del bot Baileys.",
+  "main": "webhook-ejemplo.js",
+  "scripts": {
+    "start": "node webhook-ejemplo.js",
+    "start:telegram": "node bot-telegram.js",
+    "test": "node test-logica.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.78.0",
+    "express": "^5.2.1",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
