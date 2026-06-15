@@ -61,14 +61,19 @@ app.listen(process.env.PORT || 3000, () =>
 
 // ==================== KEEPALIVE SUPABASE ====================
 // Evita que Supabase pause el proyecto (Free Tier) tras 7 días sin actividad
-setInterval(async () => {
-  try {
-    await supabase.from("cars").select("id").limit(1);
-    console.log("[Supabase KeepAlive] Ping exitoso a BD para evitar suspensión.");
-  } catch (e) {
-    console.warn("[Supabase KeepAlive] Error en ping:", e.message);
-  }
-}, 1000 * 60 * 60 * 24); // Hace ping a la BD cada 24 horas
+setInterval(
+  async () => {
+    try {
+      await supabase.from("cars").select("id").limit(1);
+      console.log(
+        "[Supabase KeepAlive] Ping exitoso a BD para evitar suspensión."
+      );
+    } catch (e) {
+      console.warn("[Supabase KeepAlive] Error en ping:", e.message);
+    }
+  },
+  1000 * 60 * 60 * 24
+); // Hace ping a la BD cada 24 horas
 
 // ==================== ALERTAS TELEGRAM ====================
 async function sendTelegramAlert(message, replyMarkup) {
@@ -118,7 +123,9 @@ async function restoreAuthFromSupabase() {
       try {
         folderData = JSON.parse(folderData);
       } catch (e) {
-        console.warn("[Auth] ⚠️ Error parseando JSON de Supabase. El respaldo está corrupto.");
+        console.warn(
+          "[Auth] ⚠️ Error parseando JSON de Supabase. El respaldo está corrupto."
+        );
         return;
       }
     }
@@ -128,9 +135,10 @@ async function restoreAuthFromSupabase() {
       Object.keys(folderData).map(async (filename) => {
         const filePath = path.join(AUTH_FOLDER, filename);
         // Escribir archivo asegurando string o Buffer según el caso
-        const fileContent = typeof folderData[filename] === "string" 
-                            ? folderData[filename] 
-                            : JSON.stringify(folderData[filename]);
+        const fileContent =
+          typeof folderData[filename] === "string"
+            ? folderData[filename]
+            : JSON.stringify(folderData[filename]);
         await fs.promises.writeFile(filePath, fileContent);
       })
     );
@@ -151,21 +159,29 @@ async function backupAuthToSupabase() {
   try {
     if (!fs.existsSync(AUTH_FOLDER)) return;
     const files = await fs.promises.readdir(AUTH_FOLDER);
-    
+
     // VERIFICACIÓN DE SEGURIDAD: No sobrescribir una sesión buena con una incompleta
     const credsPath = path.join(AUTH_FOLDER, "creds.json");
     if (!fs.existsSync(credsPath)) {
-      console.warn("[SupabaseAuth] ⚠️ No hay creds.json local. Abortando respaldo para evitar corromper la BD.");
+      console.warn(
+        "[SupabaseAuth] ⚠️ No hay creds.json local. Abortando respaldo para evitar corromper la BD."
+      );
       return;
     }
     const credsContent = await fs.promises.readFile(credsPath, "utf-8");
     const creds = JSON.parse(credsContent);
     if (!creds.registered) {
-      console.warn("[SupabaseAuth] ⚠️ Sesión local no está registrada (registered=false). Abortando respaldo.");
+      console.warn(
+        "[SupabaseAuth] ⚠️ Sesión local no está registrada (registered=false). Abortando respaldo."
+      );
       return;
     }
     if (files.length < 20) {
-      console.warn("[SupabaseAuth] ⚠️ Muy pocos archivos en .auth_baileys (" + files.length + "). Probable race condition. Abortando respaldo.");
+      console.warn(
+        "[SupabaseAuth] ⚠️ Muy pocos archivos en .auth_baileys (" +
+          files.length +
+          "). Probable race condition. Abortando respaldo."
+      );
       return;
     }
 
@@ -185,7 +201,9 @@ async function backupAuthToSupabase() {
     }
     // VERIFICACIÓN FINAL: Evitar subir cosas si creds.json falló al leerse por Race Condition
     if (!folderData["creds.json"] || !folderData["creds.json"].registered) {
-      console.warn("[SupabaseAuth] ⚠️ creds.json fue corrompido o ignorado por lectura simultánea. Abortando respaldo.");
+      console.warn(
+        "[SupabaseAuth] ⚠️ creds.json fue corrompido o ignorado por lectura simultánea. Abortando respaldo."
+      );
       return;
     }
 
@@ -193,8 +211,10 @@ async function backupAuthToSupabase() {
     await supabase
       .from("baileys_auth")
       .upsert([{ key: "backup_folder", value: folderData }]);
-      
-    console.log(`[SupabaseAuth] ✅ Respaldo ok (${Object.keys(folderData).length} archivos).`);
+
+    console.log(
+      `[SupabaseAuth] ✅ Respaldo ok (${Object.keys(folderData).length} archivos).`
+    );
   } catch (e) {
     console.warn("❌ [SupabaseAuth] Exception subiendo respaldo:", e.message);
   }
@@ -236,6 +256,7 @@ async function loadCars() {
         accLiters: 0,
         accCost: 0,
         lastOilKm: null,
+        lastOilType: null,
         lastTireKm: null,
         poliza: null
       },
@@ -246,6 +267,7 @@ async function loadCars() {
         accLiters: 0,
         accCost: 0,
         lastOilKm: null,
+        lastOilType: null,
         lastTireKm: null,
         poliza: null
       },
@@ -256,6 +278,7 @@ async function loadCars() {
         accLiters: 0,
         accCost: 0,
         lastOilKm: null,
+        lastOilType: null,
         lastTireKm: null,
         poliza: null
       }
@@ -271,6 +294,7 @@ async function loadCars() {
     if (cars[key].accCost === undefined) cars[key].accCost = 0;
     if (cars[key].baseKm === undefined) cars[key].baseKm = null;
     if (cars[key].lastOilKm === undefined) cars[key].lastOilKm = null;
+    if (cars[key].lastOilType === undefined) cars[key].lastOilType = null;
     if (cars[key].lastTireKm === undefined) cars[key].lastTireKm = null;
     if (cars[key].poliza === undefined) cars[key].poliza = null;
   }
@@ -288,7 +312,13 @@ function getSession(chatId) {
   return sessions[chatId];
 }
 function resetSession(chatId) {
-  sessions[chatId] = { step: "idle" };
+  // Mutar el MISMO objeto, no reemplazarlo. handleMessage captura `session` al inicio
+  // (const session = getSession(chatId)); si aquí reasignamos sessions[chatId] a un objeto
+  // nuevo, esa referencia queda obsoleta y el switch lee el step viejo → comandos inline
+  // como "/start 1 45320" no caen a la máquina de estados.
+  const s = getSession(chatId);
+  for (const k of Object.keys(s)) delete s[k];
+  s.step = "idle";
 }
 
 // ==================== UTILIDADES ====================
@@ -646,7 +676,7 @@ async function handleMessage(rawMessage) {
       } else {
         await reply(
           chatId,
-          `Seleccionaste ${cars[carKey].name}\nEscribe el *kilometraje* actual en el que se acaba de hacer el cambio de aceite:\n(ej. 52000)`,
+          `Seleccionaste ${cars[carKey].name}\nEscribe el *kilometraje* actual en el que se acaba de hacer el cambio de aceite y el *tipo de aceite*:\n(ej. 52000 15w-40)`,
           rawMessage
         );
         return;
@@ -976,14 +1006,26 @@ async function handleMessage(rawMessage) {
           car3: "Placa 8 | Verif: Feb-Mar / Ago-Sep"
         }[carKey] || "";
 
+      let infoAceiteExtra = "";
+      if (car.name.toLowerCase().includes("tiida")) {
+        infoAceiteExtra = "14 mm - 4.4 L";
+      } else if (car.name.toLowerCase().includes("hyundai")) {
+        infoAceiteExtra = "17 mm - 3.5 L";
+      } else if (car.name.toLowerCase().includes("chevy")) {
+        infoAceiteExtra = "15 mm - ~3.5–4.0 L";
+      }
+      const oilTypeDisplay = car.lastOilType || "No especificado";
+      const oilSummary = oilUsado !== "N/A" 
+        ? `${oilTypeDisplay} - ${oilUsado.toLocaleString("es-MX")} km - ${infoAceiteExtra}` 
+        : "N/A";
+
       await reply(
         chatId,
-        `━━━━━━━━━━━━━━━━━━━━━\n` +
-          `*Rendimiento*\n` +
+        `*Rendimiento*\n` +
           `${car.name}\n` +
           `━━━━━━━━━━━━━━━━━━━━━\n` +
           `Km recorridos:    *${kmRecorridos.toLocaleString("es-MX", { maximumFractionDigits: 1 })} km*\n` +
-          `Litros:   *${totalLiters.toFixed(2)} L*\n` +
+          `Lts:   *${totalLiters.toFixed(2)} L*\n` +
           `Costo total:      *$${totalCost.toFixed(2)}*\n` +
           `${bar} *Rendimiento:  ${rendimiento.toFixed(2)} km/L*\n` +
           `Precio prom/litro: $${totalPrecioL.toFixed(2)}/L\n` +
@@ -991,7 +1033,7 @@ async function handleMessage(rawMessage) {
           `Nueva base:        ${currentKm.toLocaleString("es-MX")} km\n` +
           `━━━━━━━━━━━━━━━━━━━━━\n` +
           `*Estado del Vehículo*\n` +
-          `Uso Aceite:  ${oilUsado !== "N/A" ? oilUsado.toLocaleString("es-MX") + " km" : "N/A"}\n` +
+          `Uso Aceite:  ${oilSummary}\n` +
           `Uso Llantas: ${tireUsado !== "N/A" ? tireUsado.toLocaleString("es-MX") + " km" : "N/A"}\n` +
           `${infoVerif}\n` +
           `━━━━━━━━━━━━━━━━━━━━━`,
@@ -1011,26 +1053,30 @@ async function handleMessage(rawMessage) {
       session.step = "input_oil_km";
       await reply(
         chatId,
-        `Seleccionaste ${cars[carKey].name}\nEscribe el *kilometraje* actual en el que se acaba de hacer el cambio de aceite:\n(ej. 52000)`,
+        `Seleccionaste ${cars[carKey].name}\nEscribe el *kilometraje* actual en el que se acaba de hacer el cambio de aceite y el *tipo de aceite*:\n(ej. 52000 15w-40)`,
         rawMessage
       );
       break;
     }
 
     case "input_oil_km": {
-      const km = parseNumber(body);
+      const parts = body.trim().split(/\s+/);
+      const kmStr = parts[0];
+      const km = parseNumber(kmStr);
       if (km === null || km <= 0) {
-        await reply(chatId, "❌ Número inválido. (ej. 52000)", rawMessage);
+        await reply(chatId, "❌ Número y tipo inválido. (ej. 52000 15w-40)", rawMessage);
         return;
       }
+      const oilType = parts.length > 1 ? parts.slice(1).join(" ") : "No especificado";
       const car = cars[session.carKey];
       car.lastOilKm = km;
+      car.lastOilType = oilType;
       await saveCars(cars);
       resetSession(chatId);
       const nextOil = km + 10000;
       await reply(
         chatId,
-        `*¡Aceite renovado a los ${km.toLocaleString("es-MX")} km!*\nEl sistema te avisará automáticamente cuando pases de los ${nextOil.toLocaleString("es-MX")} km.`,
+        `*¡Aceite (${oilType}) renovado a los ${km.toLocaleString("es-MX")} km!*\nEl sistema te avisará automáticamente cuando pases de los ${nextOil.toLocaleString("es-MX")} km.`,
         rawMessage
       );
       break;
@@ -1163,7 +1209,10 @@ async function startBot() {
       // ⚡ Para primera sesión (QR/Código) WhatsApp EXIGE que se pidan los queries iniciales.
       // Si se bloquean (fireInitQueries: false), tira Error 515 (Stream Out of Sync).
       // fireInitQueries: false,
-      // markOnlineOnConnect: false,
+      // markOnlineOnConnect:false → el bot NO se presenta "en línea". Así tu teléfono
+      // SIGUE recibiendo las push notifications de otras personas (si está en true, WhatsApp
+      // cree que ya estás viendo en escritorio y silencia el aviso en el celular).
+      markOnlineOnConnect: false,
       // Si alguien pide retrasmisión, buscar en cache en lugar de pedir a WA
       // Evita timeouts 408 causados por usuarios con versiones viejas
       getMessage: async (key) => {
@@ -1204,7 +1253,9 @@ async function startBot() {
               altPhone = "521" + phone.slice(2); // agregar el 1
             }
             if (altPhone) {
-              console.log(`[Auth] Formato ${phone} falló, reintentando con ${altPhone}...`);
+              console.log(
+                `[Auth] Formato ${phone} falló, reintentando con ${altPhone}...`
+              );
               code = await sock.requestPairingCode(altPhone);
               phone = altPhone;
             } else {
@@ -1213,7 +1264,9 @@ async function startBot() {
           }
           // Formatear como XXXX-XXXX para que sea legible
           const formatted = code.match(/.{1,4}/g)?.join("-") ?? code;
-          console.log(`[Auth] 🔑 Código de vinculación: ${formatted} (número: ${phone})`);
+          console.log(
+            `[Auth] 🔑 Código de vinculación: ${formatted} (número: ${phone})`
+          );
           // Guardar código — se enviará junto con QR HD link cuando llegue
           global.lastPairingCode = formatted;
         } catch (e) {
@@ -1265,7 +1318,7 @@ async function startBot() {
       "connection.update",
       async ({ connection, lastDisconnect, qr }) => {
         if (currentSock !== sock) return; // Evitar eventos fantasma de sockets viejos
-        
+
         // Log every state change for diagnostics
         console.log(
           `[Conexión] estado=${connection ?? "(actualizando)"} código=${lastDisconnect?.error?.output?.statusCode ?? "-"}`
@@ -1281,17 +1334,24 @@ async function startBot() {
           // Throttle de 30s para no hacer spam en Telegram
           if (!global.lastQrAlert || now - global.lastQrAlert > 30_000) {
             global.lastQrAlert = now;
-            
+
             if (usePairingCode && global.lastPairingCode) {
               await sendTelegramAlert(
                 `🔑 *Código:* \`${global.lastPairingCode}\`\n⚙️ _Dispositivos vinculados → Vincular con número_\n\n` +
-                `📷 *QR alternativo:*\n[Ver QR en alta resolución](${qrLink})\n\n` +
-                `_Usa cualquiera de las opciones._`,
-                { inline_keyboard: [[{ text: "📲 Abrir WhatsApp", url: "https://wa.me/" }]] }
+                  `📷 *QR alternativo:*\n[Ver QR en alta resolución](${qrLink})\n\n` +
+                  `_Usa cualquiera de las opciones._`,
+                {
+                  inline_keyboard: [
+                    [{ text: "📲 Abrir WhatsApp", url: "https://wa.me/" }]
+                  ]
+                }
               );
             } else {
               global.qrAlertCount = (global.qrAlertCount || 0) + 1;
-              const aviso = global.qrAlertCount >= 3 ? `\n⚠️ _Este es el QR #${global.qrAlertCount}. Si no conecta, haz redeploy._` : "";
+              const aviso =
+                global.qrAlertCount >= 3
+                  ? `\n⚠️ _Este es el QR #${global.qrAlertCount}. Si no conecta, haz redeploy._`
+                  : "";
               await sendTelegramAlert(
                 `🚨 *QR Requerido*\n📷 [Ver QR HD](${qrLink})\nWhatsApp → Dispositivos vinculados → Vincular dispositivo.${aviso}`
               );
@@ -1333,8 +1393,8 @@ async function startBot() {
             console.log(`Reintento #${retryCount} en ${delay / 1000}s...`);
             if (reconnectTimeout) clearTimeout(reconnectTimeout);
             reconnectTimeout = setTimeout(() => {
-                reconnectTimeout = null;
-                startBot();
+              reconnectTimeout = null;
+              startBot();
             }, delay);
           }
         }
@@ -1346,10 +1406,12 @@ async function startBot() {
             reconnectTimeout = null;
           }
           global.isConnected = true;
-          
+
           sock.authState.creds.registered = true;
-          try { await saveCreds(); } catch(e) {}
-          
+          try {
+            await saveCreds();
+          } catch (e) {}
+
           // Darle a Baileys 15 segundos para volcar todos los pre-keys y app-state al disco, LUEGO respaldar
           setTimeout(() => {
             if (global.isConnected) backupAuthToSupabase();
@@ -1362,8 +1424,10 @@ async function startBot() {
 
           setTimeout(async () => {
             try {
-              await sendTelegramAlert(`✅ *Sistema Reiniciado*\nBot conectado de forma estable a WhatsApp.`);
-            } catch(e) {}
+              await sendTelegramAlert(
+                `✅ *Sistema Reiniciado*\nBot conectado de forma estable a WhatsApp.`
+              );
+            } catch (e) {}
           }, 5000);
         }
       }
@@ -1388,8 +1452,8 @@ async function startBot() {
     console.log(`Reintento #${retryCount} en ${delay / 1000}s...`);
     if (reconnectTimeout) clearTimeout(reconnectTimeout);
     reconnectTimeout = setTimeout(() => {
-        reconnectTimeout = null;
-        startBot();
+      reconnectTimeout = null;
+      startBot();
     }, delay);
   }
 }
