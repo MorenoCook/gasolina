@@ -68,3 +68,13 @@ bot.on("message", async (msg) => {
 bot.on("polling_error", (e) => console.error("[polling_error]", e.message));
 
 console.log("Bot de gasolina (Telegram) corriendo en modo polling...");
+
+// Dummy HTTP server for Render "Web Service" port binding requirement
+const http = require("http");
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("Bot de Telegram activo");
+}).listen(PORT, () => {
+  console.log(`Servidor dummy escuchando en puerto ${PORT}`);
+});
